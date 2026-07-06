@@ -1,15 +1,28 @@
 {
   "name": "uniboh",
   "version": "1.0.0",
-  "description": "- virtuale.unibo.it - timetable.     - analyze the implementation in https://github.com/FrancescoBonzi/UniboCalendar/tree/master     - notes: ./unibo-timetable-calendar-api.md",
+  "description": "MCP server for University of Bologna services: Virtuale (Moodle) APIs and corsi.unibo.it timetable/ICS export.",
   "main": "dist/server.js",
+  "bin": {
+    "uniboh-mcp": "dist/server.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/server.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "unibo",
+    "moodle",
+    "virtuale",
+    "timetable",
+    "ics"
+  ],
+  "author": "gattaa",
   "license": "ISC",
   "type": "module",
   "dependencies": {
