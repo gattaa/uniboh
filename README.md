@@ -4,8 +4,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server (stdio transp
 
 - **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API (enrolled courses, course state, Panopto content).
 - **corsi.unibo.it** — public course timetables, normalized to events and exported as an ICS calendar.
+- **almaesami.unibo.it** — the student exam plan ("Riepilogo Esami"), read-only.
 
-The longer-term goal is to wrap **any Unibo service** (AlmaEsami, RPS, and others) behind one MCP server — see [CLAUDE.md](CLAUDE.md).
+The longer-term goal is to wrap **any Unibo service** (RPS and others next) behind one MCP server — see [CLAUDE.md](CLAUDE.md).
 
 ## Install
 
@@ -42,6 +43,8 @@ npm run dev
 | `VIRTUALE_BASE_URL` | no (defaults to `https://virtuale.unibo.it`) | Moodle base URL. |
 | `VIRTUALE_SESSKEY` | no | Moodle `sesskey`; with `VIRTUALE_COOKIES`, enables authenticated tools without a login call. |
 | `VIRTUALE_COOKIES` | no | Cookie header (e.g. `MoodleSession=...`). |
+| `ALMAESAMI_BASE_URL` | no (defaults to `https://almaesami.unibo.it`) | AlmaEsami base URL. |
+| `ALMAESAMI_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for `almaesami_get_exam_plan`. |
 
 ## Authentication
 
@@ -75,6 +78,15 @@ Each accepts an optional `session_id`; if omitted, the env-var session is used.
 - `unibo_calendar_list_teachings` — extract teaching IDs from the timetable page.
 - `unibo_calendar_get_events` — fetch `@@orario_reale_json` events, optional teaching-code filter.
 - `unibo_calendar_get_ics` — same, returned as an ICS calendar string.
+
+### AlmaEsami (authenticated)
+- `almaesami_get_exam_plan` — reads the student exam plan (activities, CFU, status,
+  bookable flag). Read-only: it does **not** book exams. Pass `cookies` (a cookie header
+  with an authenticated `JSESSIONID`) or set `ALMAESAMI_COOKIES`.
+
+  AlmaEsami is behind ADFS SSO with no JSON API, so authenticate the bootstrap way: log in
+  via a browser, then copy the `JSESSIONID` cookie for `almaesami.unibo.it`. See
+  [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
 
 ### Calendar flow example
 1. `unibo_calendar_resolve_timetable_url` with the unibo.it course URL.

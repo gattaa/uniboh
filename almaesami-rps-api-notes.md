@@ -37,9 +37,28 @@ natural shape.
 - **Auth trigger:** requesting `/almaesami/studenti/home.htm` unauthenticated returns
   `302 → idp.unibo.it/adfs/ls/?SAMLRequest=...&RelayState=?spidL=1&spidACS=0`.
 - **Session:** authenticated state is carried by `JSESSIONID` scoped to `/almaesami`.
-- **TODO (needs auth):** map the student endpoints under `/almaesami/studenti/` — exam
-  listings, booking/withdraw actions, results. Determine whether they return JSP HTML (to
-  scrape with cheerio) or JSON.
+- **App model:** ICEfaces + Spring Web Flow. URLs carry an `execution=eNsN` flow token; a
+  fresh GET to a `-list.htm` endpoint starts a new flow (`302 → ?execution=...`) and renders,
+  so the token does not need to be supplied. Responses are HTML (scrape with cheerio); there
+  is no JSON API.
+
+### Mapped (implemented)
+
+- **Exam plan** — `GET /almaesami/studenti/attivitaFormativaPiano-list.htm`
+  (`<title>Riepilogo Esami Studente</title>`). The activities grid is
+  `table.iceDataTblOutline`; each data `<tr>` has 7 `<td>`:
+  `[0]` expand toggle, `[1]` year, `[2]` `"CODE - NAME"`, `[3]` CdS, `[4]` CFU,
+  `[5]` status/description, `[6]` action (`prenota` / `Leggi` / empty).
+  Implemented by `src/almaesami.ts` → `almaesami_get_exam_plan` (read-only).
+  Note: cell `[2]` name may itself contain `" - "` (e.g. "CLINICAL CLERKSHIP - BASIC LIFE
+  SUPPORT"), so split code/name on the **first** separator only.
+
+### TODO (needs auth)
+
+- Other `/almaesami/studenti/` endpoints: `cronologia-list.htm` (exam history/booking
+  cronology), `messaggioStudente.htm` (messages). Booking (`_eventId=prenota`) is a
+  stateful JSF postback and a consequential real-world action — intentionally left
+  unautomated.
 
 ## RPS (rps.unibo.it)
 

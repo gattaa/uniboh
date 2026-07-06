@@ -12,10 +12,14 @@ import {
   listTeachings,
   resolveTimetableUrl
 } from "./calendar.js";
+import { getExamPlan } from "./almaesami.js";
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
 const cookies = process.env.VIRTUALE_COOKIES;
+
+const almaesamiBaseUrl = process.env.ALMAESAMI_BASE_URL ?? "https://almaesami.unibo.it";
+const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
 
 type SessionRecord = {
   id: string;
@@ -447,6 +451,41 @@ server.registerTool(
     return {
       content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
       structuredContent: { data: result.data }
+    };
+  }
+);
+
+server.registerTool(
+  "almaesami_get_exam_plan",
+  {
+    title: "Get AlmaEsami Exam Plan",
+    description:
+      "Reads the authenticated student's AlmaEsami exam plan (Riepilogo Esami): activities, CFU, status, and whether each is bookable. Read-only; does not book exams.",
+    inputSchema: {
+      cookies: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to ALMAESAMI_COOKIES."),
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cookies: inputCookies, base_url }) => {
+    const cookieHeader = inputCookies ?? almaesamiCookies;
+    if (!cookieHeader) {
+      throw new Error(
+        "No AlmaEsami session available. Pass `cookies` (JSESSIONID=...) or set ALMAESAMI_COOKIES."
+      );
+    }
+
+    const data = await getExamPlan({
+      cookies: cookieHeader,
+      baseUrl: base_url ?? almaesamiBaseUrl
+    });
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
     };
   }
 );

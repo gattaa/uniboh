@@ -9,6 +9,7 @@ Bologna services to MCP clients. It currently wraps:
 
 - **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API.
 - **corsi.unibo.it** — public course timetables, normalized to events + ICS.
+- **almaesami.unibo.it** — student exam plan ("Riepilogo Esami"), read-only HTML scrape.
 
 ## Vision
 
@@ -30,6 +31,7 @@ src/
   virtualeClient.ts  Moodle AJAX client (service.php + service-nologin.php)
   login.ts           Best-effort HTML form-login scraper (sesskey + cookies)
   calendar.ts        corsi.unibo.it timetable → normalized events → ICS (pure + fetch)
+  almaesami.ts       AlmaEsami exam-plan scraper (pure parseExamPlan + fetch getExamPlan)
   *.test.ts          node:test unit tests, excluded from the build
 ```
 
