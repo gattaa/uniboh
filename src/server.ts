@@ -13,6 +13,7 @@ import {
   resolveTimetableUrl
 } from "./calendar.js";
 import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
+import { getAttendanceRecords, getRegister } from "./rps.js";
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
@@ -20,6 +21,9 @@ const cookies = process.env.VIRTUALE_COOKIES;
 
 const almaesamiBaseUrl = process.env.ALMAESAMI_BASE_URL ?? "https://almaesami.unibo.it";
 const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
+
+const rpsBaseUrl = process.env.RPS_BASE_URL ?? "https://rps.unibo.it";
+const rpsCookies = process.env.RPS_COOKIES;
 
 type SessionRecord = {
   id: string;
@@ -529,6 +533,65 @@ server.registerTool(
   },
   async ({ cookies: inputCookies, base_url }) => {
     const data = await getMessages(resolveAlmaesamiContext(inputCookies, base_url));
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+const rpsCookiesSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Cookie header with an authenticated PHPSESSID from a logged-in RPS browser session. Falls back to RPS_COOKIES."
+  );
+
+function resolveRpsContext(inputCookies?: string, baseUrlOverride?: string): {
+  cookies: string;
+  baseUrl: string;
+} {
+  const cookieHeader = inputCookies ?? rpsCookies;
+  if (!cookieHeader) {
+    throw new Error("No RPS session available. Pass `cookies` (PHPSESSID=...) or set RPS_COOKIES.");
+  }
+  return { cookies: cookieHeader, baseUrl: baseUrlOverride ?? rpsBaseUrl };
+}
+
+server.registerTool(
+  "rps_get_attendance_records",
+  {
+    title: "Get RPS Attendance Records",
+    description:
+      "Reads the authenticated student's RPS attendance records (Rilevazioni): date, subject, lecturer, and lesson duration for each recorded presence. Read-only.",
+    inputSchema: {
+      cookies: rpsCookiesSchema,
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cookies: inputCookies, base_url }) => {
+    const data = await getAttendanceRecords(resolveRpsContext(inputCookies, base_url));
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+server.registerTool(
+  "rps_get_register",
+  {
+    title: "Get RPS Attendance Register",
+    description:
+      "Reads the authenticated student's RPS attendance register (Registro): per-subject hours attended and attendance percentage. Read-only.",
+    inputSchema: {
+      cookies: rpsCookiesSchema,
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cookies: inputCookies, base_url }) => {
+    const data = await getRegister(resolveRpsContext(inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data

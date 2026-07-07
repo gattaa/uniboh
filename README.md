@@ -4,9 +4,11 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server (stdio transp
 
 - **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API (enrolled courses, course state, Panopto content).
 - **corsi.unibo.it** — public course timetables, normalized to events and exported as an ICS calendar.
-- **almaesami.unibo.it** — the student exam plan ("Riepilogo Esami"), read-only.
+- **almaesami.unibo.it** — student exam plan, history, and messages, read-only.
+- **rps.unibo.it** — student attendance ("Presenze studenti"): records and register, read-only.
 
-The longer-term goal is to wrap **any Unibo service** (RPS and others next) behind one MCP server — see [CLAUDE.md](CLAUDE.md).
+The longer-term goal is to wrap **any Unibo service** behind one MCP server — see
+[CLAUDE.md](CLAUDE.md).
 
 ## Install
 
@@ -44,7 +46,9 @@ npm run dev
 | `VIRTUALE_SESSKEY` | no | Moodle `sesskey`; with `VIRTUALE_COOKIES`, enables authenticated tools without a login call. |
 | `VIRTUALE_COOKIES` | no | Cookie header (e.g. `MoodleSession=...`). |
 | `ALMAESAMI_BASE_URL` | no (defaults to `https://almaesami.unibo.it`) | AlmaEsami base URL. |
-| `ALMAESAMI_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for `almaesami_get_exam_plan`. |
+| `ALMAESAMI_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for the `almaesami_*` tools. |
+| `RPS_BASE_URL` | no (defaults to `https://rps.unibo.it`) | RPS base URL. |
+| `RPS_COOKIES` | no | Cookie header with an authenticated `PHPSESSID`; fallback for the `rps_*` tools. |
 
 ## Authentication
 
@@ -94,6 +98,18 @@ are intentionally not automated.
 AlmaEsami is behind ADFS SSO with no JSON API, so authenticate the bootstrap way: log in
 via a browser, then copy the `JSESSIONID` cookie for `almaesami.unibo.it` (it expires after
 a short idle period). See [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
+
+### RPS — attendance (authenticated)
+All read-only. Each accepts `cookies` (a cookie header with an authenticated `PHPSESSID`)
+or falls back to `RPS_COOKIES`.
+
+- `rps_get_attendance_records` — recorded presences (date, subject, lecturer, duration).
+- `rps_get_register` — per-subject hours attended and attendance percentage.
+
+Confirming attendance by entering a "codice rilevazione" is a write action and is
+intentionally not automated. Authenticate the bootstrap way: log fully into
+`rps.unibo.it`, confirm you see the app (not the SSO Sign In page), then copy the
+`PHPSESSID` cookie.
 
 ### Calendar flow example
 1. `unibo_calendar_resolve_timetable_url` with the unibo.it course URL.

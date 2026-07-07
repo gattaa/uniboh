@@ -9,19 +9,22 @@ Bologna services to MCP clients. It currently wraps:
 
 - **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API.
 - **corsi.unibo.it** — public course timetables, normalized to events + ICS.
-- **almaesami.unibo.it** — student exam plan ("Riepilogo Esami"), read-only HTML scrape.
+- **almaesami.unibo.it** — student exam plan, history, and messages, read-only HTML scrape.
+- **rps.unibo.it** — student attendance ("Presenze studenti"): records + register, read-only.
 
 ## Vision
 
 The goal is for this server to be a **single MCP gateway to _any_ Unibo service**, not just
-Virtuale and timetables. Planned/wanted integrations:
+Virtuale and timetables. Done so far: Virtuale, timetables/ICS, AlmaEsami (exam plan,
+history, messages), RPS (attendance records + register). Candidate next integrations:
 
-- **AlmaEsami** (almaesami.unibo.it) — exam listings, booking/registration status, results.
-- **RPS** — reservation/booking service (study seats, resources).
-- Studenti Online, library (SBA/OPAC), and other unibo.it subsystems as they come up.
+- **Studenti Online** (studenti.unibo.it) — enrolments, fees, career.
+- Library (SBA / OPAC), AlmaRM, and other unibo.it subsystems as they come up.
 
-When adding a new service, keep the existing shape: one client module per service, one thin
-tool-registration block per capability, session/auth handled the same way as Virtuale.
+When adding a new service, keep the existing shape: one client/scraper module per service,
+one thin tool-registration block per capability, and the bootstrap-cookie auth model —
+almost everything Unibo is behind the same `idp.unibo.it` ADFS SSO, so a browser-captured
+per-host session cookie (env fallback + per-call override) is the reliable path.
 
 ## Layout
 
@@ -31,7 +34,8 @@ src/
   virtualeClient.ts  Moodle AJAX client (service.php + service-nologin.php)
   login.ts           Best-effort HTML form-login scraper (sesskey + cookies)
   calendar.ts        corsi.unibo.it timetable → normalized events → ICS (pure + fetch)
-  almaesami.ts       AlmaEsami exam-plan scraper (pure parseExamPlan + fetch getExamPlan)
+  almaesami.ts       AlmaEsami scrapers (exam plan / history / messages)
+  rps.ts             RPS attendance scrapers (attendance records + register)
   *.test.ts          node:test unit tests, excluded from the build
 ```
 

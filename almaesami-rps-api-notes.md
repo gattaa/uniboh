@@ -74,17 +74,30 @@ natural shape.
   and consequential real-world actions — intentionally left unautomated.
 - `personale/` (staff) area is unmapped.
 
-## RPS (rps.unibo.it)
+## RPS (rps.unibo.it) — "Registro Presenze Studenti" (student attendance)
 
-- **Stack:** looks like a **CakePHP** app — the SAML `RelayState` points at
-  `https://rps.unibo.it/users/login?redirect=%2F` (`/users/login` is the CakePHP
-  convention).
-- **Auth trigger:** requesting `/` unauthenticated returns
-  `302 → idp.unibo.it/adfs/ls/?SAMLRequest=...&RelayState=.../users/login...` (SAML request
-  is signed: `SigAlg=...rsa-sha256`).
-- **Session:** expect a CakePHP session cookie (e.g. `CAKEPHP=...`) after SSO.
-- **TODO (needs auth):** identify what RPS actually manages for the student view and its
-  routes/JSON endpoints.
+- **Stack:** CakePHP app; the SAML `RelayState` points at
+  `https://rps.unibo.it/users/login?redirect=%2F`. Auth carried by **`PHPSESSID`** (the
+  cookie must be captured *after* completing SSO, or it stays unauthenticated and `/`
+  bounces to the IdP).
+- **Auth trigger:** unauthenticated `/` → `302 → idp.unibo.it/adfs/ls/?SAMLRequest=...`.
+  The signed-out state renders `<title>Sign In</title>` with a `name="SAMLRequest"` form.
+- **Views (plain Bootstrap `<table>`, scraped):**
+  - **Home** `/students` — form to enter a `codice rilevazione` and confirm attendance.
+    This is a **write** (`GET /students/attendance/lesson?q_cod_ril=...`) — intentionally
+    not automated.
+  - **Rilevazioni** `GET /students/surveys?lang=it` — attendance records. `thead`:
+    Data | Materia | Docente | Durata lezione. Subject cell is `"CODE NAME"` (space-split,
+    name may contain `" / module"`). → `rps_get_attendance_records`.
+  - **Registro** `GET /students/register?lang=it` — per-subject summary. `thead`:
+    Materia | Ore | Perc. Percentuale (percentage in Italian format `"80,88%"`, may be
+    empty). → `rps_get_register`.
+- **Auth-detection gotcha:** an authenticated page still links to the ADFS *sign-out* URL
+  (`.../adfs/ls/?wa=wsignout1.0`), so a bare `idp.unibo.it/adfs` substring in the HTML is
+  **not** a sign of being logged out. Detect unauth via the final URL landing on the IdP,
+  a `name="SAMLRequest"` form, or the `Sign In` title instead.
+- **App model:** unlike AlmaEsami, RPS pages are static server-rendered tables (no ICEfaces
+  flow tokens), so direct GETs work cleanly.
 
 ## How to map the authenticated endpoints
 
