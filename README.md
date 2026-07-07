@@ -80,13 +80,20 @@ Each accepts an optional `session_id`; if omitted, the env-var session is used.
 - `unibo_calendar_get_ics` — same, returned as an ICS calendar string.
 
 ### AlmaEsami (authenticated)
-- `almaesami_get_exam_plan` — reads the student exam plan (activities, CFU, status,
-  bookable flag). Read-only: it does **not** book exams. Pass `cookies` (a cookie header
-  with an authenticated `JSESSIONID`) or set `ALMAESAMI_COOKIES`.
+All read-only. Each accepts `cookies` (a cookie header with an authenticated `JSESSIONID`)
+or falls back to `ALMAESAMI_COOKIES`.
 
-  AlmaEsami is behind ADFS SSO with no JSON API, so authenticate the bootstrap way: log in
-  via a browser, then copy the `JSESSIONID` cookie for `almaesami.unibo.it`. See
-  [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
+- `almaesami_get_exam_plan` — the exam plan (activities, CFU, status, bookable flag).
+- `almaesami_get_exam_history` — the exam history / cronologia (appello date, examiner,
+  type/mode, status).
+- `almaesami_get_messages` — student messages (subject, sender, date, related appello).
+
+These never mutate state: booking an exam ("prenota") and deleting messages ("Cancella")
+are intentionally not automated.
+
+AlmaEsami is behind ADFS SSO with no JSON API, so authenticate the bootstrap way: log in
+via a browser, then copy the `JSESSIONID` cookie for `almaesami.unibo.it` (it expires after
+a short idle period). See [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
 
 ### Calendar flow example
 1. `unibo_calendar_resolve_timetable_url` with the unibo.it course URL.

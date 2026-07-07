@@ -12,7 +12,7 @@ import {
   listTeachings,
   resolveTimetableUrl
 } from "./calendar.js";
-import { getExamPlan } from "./almaesami.js";
+import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
@@ -455,6 +455,27 @@ server.registerTool(
   }
 );
 
+const almaesamiCookiesSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to ALMAESAMI_COOKIES."
+  );
+
+function resolveAlmaesamiContext(inputCookies?: string, baseUrlOverride?: string): {
+  cookies: string;
+  baseUrl: string;
+} {
+  const cookies = inputCookies ?? almaesamiCookies;
+  if (!cookies) {
+    throw new Error(
+      "No AlmaEsami session available. Pass `cookies` (JSESSIONID=...) or set ALMAESAMI_COOKIES."
+    );
+  }
+  return { cookies, baseUrl: baseUrlOverride ?? almaesamiBaseUrl };
+}
+
 server.registerTool(
   "almaesami_get_exam_plan",
   {
@@ -462,27 +483,52 @@ server.registerTool(
     description:
       "Reads the authenticated student's AlmaEsami exam plan (Riepilogo Esami): activities, CFU, status, and whether each is bookable. Read-only; does not book exams.",
     inputSchema: {
-      cookies: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to ALMAESAMI_COOKIES."),
+      cookies: almaesamiCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
   async ({ cookies: inputCookies, base_url }) => {
-    const cookieHeader = inputCookies ?? almaesamiCookies;
-    if (!cookieHeader) {
-      throw new Error(
-        "No AlmaEsami session available. Pass `cookies` (JSESSIONID=...) or set ALMAESAMI_COOKIES."
-      );
+    const data = await getExamPlan(resolveAlmaesamiContext(inputCookies, base_url));
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+server.registerTool(
+  "almaesami_get_exam_history",
+  {
+    title: "Get AlmaEsami Exam History",
+    description:
+      "Reads the authenticated student's AlmaEsami exam history (Cronologia): appello date, activity, examiner, type/mode, and status. Read-only.",
+    inputSchema: {
+      cookies: almaesamiCookiesSchema,
+      base_url: z.string().url().optional()
     }
+  },
+  async ({ cookies: inputCookies, base_url }) => {
+    const data = await getExamHistory(resolveAlmaesamiContext(inputCookies, base_url));
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
 
-    const data = await getExamPlan({
-      cookies: cookieHeader,
-      baseUrl: base_url ?? almaesamiBaseUrl
-    });
-
+server.registerTool(
+  "almaesami_get_messages",
+  {
+    title: "Get AlmaEsami Messages",
+    description:
+      "Reads the authenticated student's AlmaEsami messages (subject, sender, received date, related appello). Read-only; does not delete messages.",
+    inputSchema: {
+      cookies: almaesamiCookiesSchema,
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cookies: inputCookies, base_url }) => {
+    const data = await getMessages(resolveAlmaesamiContext(inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data

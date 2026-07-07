@@ -53,12 +53,26 @@ natural shape.
   Note: cell `[2]` name may itself contain `" - "` (e.g. "CLINICAL CLERKSHIP - BASIC LIFE
   SUPPORT"), so split code/name on the **first** separator only.
 
+- **Exam history** — `GET /almaesami/studenti/cronologia-list.htm`. Same
+  `table.iceDataTblOutline`; 6 columns per row: `[0]` date/time, `[1]`
+  `"CODE NAME (Cds. NNNN)"` (space-separated code; CdS in a trailing `(Cds. …)`),
+  `[2]` examiner, `[3]` type (`prova`/`listaAperta`), `[4]` mode (`Scritto`/`Orale`/…),
+  `[5]` status. → `almaesami_get_exam_history`.
+
+- **Messages** — `GET /almaesami/studenti/messaggioStudente.htm`. Same grid; 7 columns:
+  `[1]` related appello ref (`"TEACHER: date time"`), `[2]` received date/time,
+  `[3]` subject, `[4]` sender, `[5]` `Leggi`, `[6]` `Cancella`.
+  → `almaesami_get_messages`.
+
+- **Session expiry:** once the `JSESSIONID` goes stale, requests 302 to
+  `/almaesami/sessionExpired.htm` (`<title>… sessione scaduta</title>`). The readers detect
+  both this and the SSO bounce and raise a clear "re-capture the cookie" error.
+
 ### TODO (needs auth)
 
-- Other `/almaesami/studenti/` endpoints: `cronologia-list.htm` (exam history/booking
-  cronology), `messaggioStudente.htm` (messages). Booking (`_eventId=prenota`) is a
-  stateful JSF postback and a consequential real-world action — intentionally left
-  unautomated.
+- Booking (`_eventId=prenota`) and message deletion (`Cancella`) are stateful JSF postbacks
+  and consequential real-world actions — intentionally left unautomated.
+- `personale/` (staff) area is unmapped.
 
 ## RPS (rps.unibo.it)
 

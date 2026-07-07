@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseExamPlan } from "./almaesami.js";
+import { parseExamPlan, parseExamHistory, parseMessages } from "./almaesami.js";
 
 // Synthetic fixture mirroring the AlmaEsami "Riepilogo Esami" grid structure.
 // (Real student data is never committed.)
@@ -16,6 +16,11 @@ function planPage(rows: string): string {
 
 function row(cells: string[]): string {
   return "<tr>" + cells.map((c) => `<td>${c}</td>`).join("") + "</tr>";
+}
+
+// Bare iceDataTblOutline grid (no header row) for the history/messages parsers.
+function grid(rows: string): string {
+  return `<html><body><table class="iceDataTblOutline">${rows}</table></body></html>`;
 }
 
 test("parseExamPlan extracts one entry per data row", () => {
@@ -70,4 +75,72 @@ test("parseExamPlan throws a clear error on an SSO login bounce", () => {
 
 test("parseExamPlan throws when the grid is absent", () => {
   assert.throws(() => parseExamPlan("<html><body>no grid here</body></html>"), /iceDataTblOutline/);
+});
+
+test("parsers detect the session-expired page", () => {
+  const expired = "<html><head><title>AlmaEsami - sessione scaduta</title></head><body>sessionExpired</body></html>";
+  assert.throws(() => parseExamPlan(expired), /expired|scaduta/i);
+  assert.throws(() => parseExamHistory(expired), /expired|scaduta/i);
+  assert.throws(() => parseMessages(expired), /expired|scaduta/i);
+});
+
+test("parseExamHistory maps appello rows and extracts code/name/cds", () => {
+  const html = grid(
+    row([
+      "04/02/2026 11:00",
+      "84252 CHEMISTRY AND BIOCHEMISTRY (I.C.) (Cds. 6734)",
+      "CALICETI CRISTIANA",
+      "prova",
+      "Scritto",
+      "prenotato"
+    ])
+  );
+  const { entries } = parseExamHistory(html);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], {
+    datetime: "04/02/2026 11:00",
+    code: "84252",
+    name: "CHEMISTRY AND BIOCHEMISTRY (I.C.)",
+    cds: "6734",
+    teacher: "CALICETI CRISTIANA",
+    type: "prova",
+    mode: "Scritto",
+    status: "prenotato"
+  });
+});
+
+test("parseExamHistory tolerates a missing (Cds. …) suffix", () => {
+  const { entries } = parseExamHistory(
+    grid(row(["01/01/2025 00:00", "C0233 PHILOSOPHY OF MEDICINE", "ROSSI M", "prova", "Orale", "sostenuto"]))
+  );
+  assert.equal(entries[0].code, "C0233");
+  assert.equal(entries[0].name, "PHILOSOPHY OF MEDICINE");
+  assert.equal(entries[0].cds, "");
+});
+
+test("parseMessages maps subject, sender, date and appello reference", () => {
+  const html = grid(
+    row([
+      "",
+      "PELLERI MARIA CHIARA: 19/02/2026 09:30",
+      "09/02/2026 14:45",
+      "Exam date change",
+      "D'UVA GABRIELE MATTEO",
+      "Leggi",
+      "Cancella"
+    ])
+  );
+  const { messages } = parseMessages(html);
+  assert.equal(messages.length, 1);
+  assert.deepEqual(messages[0], {
+    examRef: "PELLERI MARIA CHIARA: 19/02/2026 09:30",
+    receivedAt: "09/02/2026 14:45",
+    subject: "Exam date change",
+    sender: "D'UVA GABRIELE MATTEO"
+  });
+});
+
+test("parseMessages skips rows without a subject", () => {
+  const { messages } = parseMessages(grid(row(["", "ref", "01/01/2026 00:00", "", "Sender", "Leggi", "Cancella"])));
+  assert.equal(messages.length, 0);
 });
