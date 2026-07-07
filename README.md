@@ -60,12 +60,21 @@ Authenticated Virtuale tools need both a `sesskey` and a cookie header. Three wa
 
 Session data is kept in server memory only and is never written to disk. Treat `sesskey` + cookies as account-bound secrets.
 
+### Keeping secrets out of the model's context
+
+If credentials are set via env vars (`VIRTUALE_SESSKEY`/`VIRTUALE_COOKIES`, `ALMAESAMI_COOKIES`, `RPS_COOKIES`), every tool already falls back to them silently when a call omits `cookies`/`session_id` — the model never has to see or pass the secret at all.
+
+If you'd rather the model work with an explicit handle instead of an invisible fallback, call the corresponding env-session tool first — `virtuale_get_env_session`, `almaesami_get_env_session`, or `rps_get_env_session` — each takes no input, reads its env var(s) server-side, and returns only an opaque `session_id` (idempotent: repeat calls return the same id). Pass that `session_id` to the other tools for that service. The underlying `sesskey`/cookie is never included in any of these responses.
+
+This only covers a single account per service. `virtuale_bootstrap_session` and `virtuale_login_with_password` still take credentials as tool input (by design, since you're supplying them inline), so those do pass through the model's context.
+
 ## Tools
 
 ### Session management
-- `virtuale_login_with_password` — form login → stores session, returns `session_id` + `sesskey`.
+- `virtuale_login_with_password` — form login → stores session, returns `session_id`.
 - `virtuale_bootstrap_session` — build a session from an existing `sesskey` + cookies.
-- `virtuale_get_session_info` — stored session metadata (optionally the cookie header).
+- `virtuale_get_env_session` — mint/reuse a `session_id` from `VIRTUALE_SESSKEY`/`VIRTUALE_COOKIES` without ever returning the secret. See [Keeping secrets out of the model's context](#keeping-secrets-out-of-the-models-context).
+- `virtuale_get_session_info` — stored session metadata (optionally the sesskey/cookie header).
 - `virtuale_logout_session` — drop one session from memory.
 - `virtuale_health_check` — no-login `core_get_string` probe for connectivity.
 
@@ -76,6 +85,22 @@ Session data is kept in server memory only and is never written to disk. Treat `
 
 Each accepts an optional `session_id`; if omitted, the env-var session is used.
 
+### Virtuale quizzes (authenticated, read-only)
+`mod_quiz_*` isn't on the AJAX service allowlist, so these scrape the same HTML a browser
+sees (course page → quiz page → attempt review page). Each accepts `session_id`,
+`cookies` (a cookie header with an authenticated `MoodleSession`), or falls back to
+`VIRTUALE_COOKIES`.
+
+- `virtuale_quiz_list_course_quizzes` — quiz activities on a course page, with the `cmid`
+  needed by the other quiz tools.
+- `virtuale_quiz_list_attempts` — a quiz's attempt summaries (status, dates, marks, grade,
+  review URL/attempt id) for finished attempts.
+- `virtuale_quiz_get_attempt_review` — one finished attempt's questions, answer options,
+  the student's selection, correctness, and feedback.
+
+Scoped to reviewing attempts already finished and reviewable under the quiz's own review
+settings — it does not start, resume, or answer a live/in-progress attempt.
+
 ### Timetable / calendar (public, no auth)
 - `unibo_calendar_resolve_timetable_url` — find the corsi.unibo.it timetable URL from a course page.
 - `unibo_calendar_list_curricula` — list curricula from `@@available_curricula`.
@@ -84,9 +109,10 @@ Each accepts an optional `session_id`; if omitted, the env-var session is used.
 - `unibo_calendar_get_ics` — same, returned as an ICS calendar string.
 
 ### AlmaEsami (authenticated)
-All read-only. Each accepts `cookies` (a cookie header with an authenticated `JSESSIONID`)
-or falls back to `ALMAESAMI_COOKIES`.
+All read-only. Each accepts `session_id` (from `almaesami_get_env_session`) or `cookies`
+(a cookie header with an authenticated `JSESSIONID`), or falls back to `ALMAESAMI_COOKIES`.
 
+- `almaesami_get_env_session` — mint/reuse a `session_id` from `ALMAESAMI_COOKIES` without ever returning the cookie.
 - `almaesami_get_exam_plan` — the exam plan (activities, CFU, status, bookable flag).
 - `almaesami_get_exam_history` — the exam history / cronologia (appello date, examiner,
   type/mode, status).
@@ -100,9 +126,10 @@ via a browser, then copy the `JSESSIONID` cookie for `almaesami.unibo.it` (it ex
 a short idle period). See [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
 
 ### RPS — attendance (authenticated)
-All read-only. Each accepts `cookies` (a cookie header with an authenticated `PHPSESSID`)
-or falls back to `RPS_COOKIES`.
+All read-only. Each accepts `session_id` (from `rps_get_env_session`) or `cookies`
+(a cookie header with an authenticated `PHPSESSID`), or falls back to `RPS_COOKIES`.
 
+- `rps_get_env_session` — mint/reuse a `session_id` from `RPS_COOKIES` without ever returning the cookie.
 - `rps_get_attendance_records` — recorded presences (date, subject, lecturer, duration).
 - `rps_get_register` — per-subject hours attended and attendance percentage.
 

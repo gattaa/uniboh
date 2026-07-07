@@ -14,6 +14,7 @@ import {
 } from "./calendar.js";
 import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
 import { getAttendanceRecords, getRegister } from "./rps.js";
+import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
@@ -112,7 +113,6 @@ server.registerTool(
 
     const out: Record<string, unknown> = {
       session_id: id,
-      sesskey: login.sesskey,
       base_url: baseUrl,
       login_url: login.loginUrl,
       final_url: login.finalUrl,
@@ -120,6 +120,7 @@ server.registerTool(
     };
 
     if (include_cookie_header) {
+      out.sesskey = login.sesskey;
       out.cookies = login.cookies;
     }
 
@@ -181,6 +182,52 @@ server.registerTool(
   }
 );
 
+let virtualeEnvSessionId: string | undefined;
+
+server.registerTool(
+  "virtuale_get_env_session",
+  {
+    title: "Get Env-Backed Session",
+    description:
+      "Mints (or reuses) a session_id backed by the server's VIRTUALE_SESSKEY + VIRTUALE_COOKIES env vars. The sesskey/cookies are never returned — only an opaque session_id, so credentials configured in the MCP host's environment never pass through the model's context.",
+    inputSchema: {}
+  },
+  async () => {
+    if (!envClient || !sesskey || !cookies) {
+      throw new Error("VIRTUALE_SESSKEY and VIRTUALE_COOKIES are not both set in the server environment.");
+    }
+
+    const existing = virtualeEnvSessionId ? sessions.get(virtualeEnvSessionId) : undefined;
+    if (existing) {
+      existing.updatedAtIso = new Date().toISOString();
+      const out = { session_id: existing.id, base_url: baseUrl, created_at: existing.createdAtIso };
+      return {
+        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+        structuredContent: out
+      };
+    }
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    sessions.set(id, {
+      id,
+      email: "env-session",
+      sesskey,
+      cookies,
+      createdAtIso: now,
+      updatedAtIso: now,
+      client: envClient
+    });
+    virtualeEnvSessionId = id;
+
+    const out = { session_id: id, base_url: baseUrl, created_at: now };
+    return {
+      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+      structuredContent: out
+    };
+  }
+);
+
 server.registerTool(
   "virtuale_get_session_info",
   {
@@ -200,12 +247,12 @@ server.registerTool(
     const out: Record<string, unknown> = {
       session_id: session.id,
       email: session.email,
-      sesskey: session.sesskey,
       created_at: session.createdAtIso,
       last_used_at: session.updatedAtIso
     };
 
     if (include_cookie_header) {
+      out.sesskey = session.sesskey;
       out.cookies = session.cookies;
     }
 
@@ -459,26 +506,214 @@ server.registerTool(
   }
 );
 
+function resolveVirtualeCookies(sessionId?: string, cookieOverride?: string): string {
+  if (cookieOverride) {
+    return cookieOverride;
+  }
+  if (sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) {
+      throw new Error("Unknown session_id.");
+    }
+    return session.cookies;
+  }
+  if (cookies) {
+    return cookies;
+  }
+  throw new Error(
+    "No Virtuale cookie session available. Pass `cookies` (MoodleSession=...), a `session_id` from virtuale_bootstrap_session, or set VIRTUALE_COOKIES."
+  );
+}
+
+server.registerTool(
+  "virtuale_quiz_list_course_quizzes",
+  {
+    title: "List Course Quizzes",
+    description: "Lists quiz activities on a course page, with the course-module id (cmid) needed by the other quiz tools.",
+    inputSchema: {
+      course_id: z.number().int().positive(),
+      session_id: z.string().optional(),
+      cookies: z.string().min(1).optional(),
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ course_id, session_id, cookies: cookieOverride, base_url }) => {
+    const data = await getCourseQuizzes(course_id, {
+      cookies: resolveVirtualeCookies(session_id, cookieOverride),
+      baseUrl: base_url ?? baseUrl
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+server.registerTool(
+  "virtuale_quiz_list_attempts",
+  {
+    title: "List Quiz Attempts",
+    description:
+      "Reads a quiz activity page and returns the student's attempt summaries (status, dates, marks, grade) plus a review URL/attempt id for each finished attempt. Read-only.",
+    inputSchema: {
+      cmid: z.number().int().positive(),
+      session_id: z.string().optional(),
+      cookies: z.string().min(1).optional(),
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cmid, session_id, cookies: cookieOverride, base_url }) => {
+    const data = await getQuizAttempts(cmid, {
+      cookies: resolveVirtualeCookies(session_id, cookieOverride),
+      baseUrl: base_url ?? baseUrl
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+server.registerTool(
+  "virtuale_quiz_get_attempt_review",
+  {
+    title: "Get Quiz Attempt Review",
+    description:
+      "Reads the review page of one of the student's own finished quiz attempts: each question's text, answer options, the student's selection, correctness, and feedback. Only works for attempts Moodle already allows the student to review (finished, review permitted by the quiz settings) — it does not start, resume, or answer a live attempt.",
+    inputSchema: {
+      attempt_id: z.number().int().positive(),
+      cmid: z.number().int().positive(),
+      session_id: z.string().optional(),
+      cookies: z.string().min(1).optional(),
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ attempt_id, cmid, session_id, cookies: cookieOverride, base_url }) => {
+    const data = await getAttemptReview(attempt_id, cmid, {
+      cookies: resolveVirtualeCookies(session_id, cookieOverride),
+      baseUrl: base_url ?? baseUrl
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data
+    };
+  }
+);
+
+/**
+ * Generic env-backed cookie session store, shared by AlmaEsami and RPS (both
+ * are plain cookie-header auth, unlike Virtuale's sesskey+cookie sessions
+ * above). One tool per service mints/reuses a session_id from that service's
+ * env var; the cookie itself is never echoed back to the caller.
+ */
+type CookieSessionRecord = {
+  id: string;
+  service: string;
+  cookies: string;
+  baseUrl: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+};
+
+const cookieSessions = new Map<string, CookieSessionRecord>();
+const envCookieSessionIds = new Map<string, string>();
+
+function getOrCreateEnvCookieSession(service: string, envCookies: string | undefined, baseUrl: string, envVarName: string): CookieSessionRecord {
+  if (!envCookies) {
+    throw new Error(`${envVarName} is not set in the server environment.`);
+  }
+
+  const existing = cookieSessions.get(envCookieSessionIds.get(service) ?? "");
+  if (existing) {
+    existing.updatedAtIso = new Date().toISOString();
+    return existing;
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const record: CookieSessionRecord = { id, service, cookies: envCookies, baseUrl, createdAtIso: now, updatedAtIso: now };
+  cookieSessions.set(id, record);
+  envCookieSessionIds.set(service, id);
+  return record;
+}
+
+function resolveCookieSession(
+  service: string,
+  sessionId: string | undefined,
+  inputCookies: string | undefined,
+  envCookies: string | undefined,
+  baseUrlOverride: string | undefined,
+  defaultBaseUrl: string,
+  envVarName: string
+): { cookies: string; baseUrl: string } {
+  if (sessionId) {
+    const session = cookieSessions.get(sessionId);
+    if (!session || session.service !== service) {
+      throw new Error(`Unknown ${service} session_id.`);
+    }
+    session.updatedAtIso = new Date().toISOString();
+    return { cookies: session.cookies, baseUrl: session.baseUrl };
+  }
+
+  const cookies = inputCookies ?? envCookies;
+  if (!cookies) {
+    throw new Error(
+      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see ${service}_get_env_session), or set ${envVarName}.`
+    );
+  }
+  return { cookies, baseUrl: baseUrlOverride ?? defaultBaseUrl };
+}
+
+function registerEnvCookieSessionTool(opts: {
+  toolName: string;
+  title: string;
+  service: string;
+  envCookies: string | undefined;
+  baseUrl: string;
+  envVarName: string;
+}) {
+  server.registerTool(
+    opts.toolName,
+    {
+      title: opts.title,
+      description: `Mints (or reuses) a session_id backed by the server's ${opts.envVarName} env var. The cookie is never returned — only an opaque session_id.`,
+      inputSchema: {}
+    },
+    async () => {
+      const session = getOrCreateEnvCookieSession(opts.service, opts.envCookies, opts.baseUrl, opts.envVarName);
+      const out = { session_id: session.id, base_url: session.baseUrl, created_at: session.createdAtIso };
+      return {
+        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+        structuredContent: out
+      };
+    }
+  );
+}
+
 const almaesamiCookiesSchema = z
   .string()
   .min(1)
   .optional()
   .describe(
-    "Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to ALMAESAMI_COOKIES."
+    "Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to session_id, then ALMAESAMI_COOKIES."
   );
+const almaesamiSessionIdSchema = z.string().min(1).optional().describe("session_id from almaesami_get_env_session.");
 
-function resolveAlmaesamiContext(inputCookies?: string, baseUrlOverride?: string): {
+function resolveAlmaesamiContext(sessionId?: string, inputCookies?: string, baseUrlOverride?: string): {
   cookies: string;
   baseUrl: string;
 } {
-  const cookies = inputCookies ?? almaesamiCookies;
-  if (!cookies) {
-    throw new Error(
-      "No AlmaEsami session available. Pass `cookies` (JSESSIONID=...) or set ALMAESAMI_COOKIES."
-    );
-  }
-  return { cookies, baseUrl: baseUrlOverride ?? almaesamiBaseUrl };
+  return resolveCookieSession("almaesami", sessionId, inputCookies, almaesamiCookies, baseUrlOverride, almaesamiBaseUrl, "ALMAESAMI_COOKIES");
 }
+
+registerEnvCookieSessionTool({
+  toolName: "almaesami_get_env_session",
+  title: "Get AlmaEsami Env-Backed Session",
+  service: "almaesami",
+  envCookies: almaesamiCookies,
+  baseUrl: almaesamiBaseUrl,
+  envVarName: "ALMAESAMI_COOKIES"
+});
 
 server.registerTool(
   "almaesami_get_exam_plan",
@@ -487,12 +722,13 @@ server.registerTool(
     description:
       "Reads the authenticated student's AlmaEsami exam plan (Riepilogo Esami): activities, CFU, status, and whether each is bookable. Read-only; does not book exams.",
     inputSchema: {
+      session_id: almaesamiSessionIdSchema,
       cookies: almaesamiCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
-  async ({ cookies: inputCookies, base_url }) => {
-    const data = await getExamPlan(resolveAlmaesamiContext(inputCookies, base_url));
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await getExamPlan(resolveAlmaesamiContext(session_id, inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data
@@ -507,12 +743,13 @@ server.registerTool(
     description:
       "Reads the authenticated student's AlmaEsami exam history (Cronologia): appello date, activity, examiner, type/mode, and status. Read-only.",
     inputSchema: {
+      session_id: almaesamiSessionIdSchema,
       cookies: almaesamiCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
-  async ({ cookies: inputCookies, base_url }) => {
-    const data = await getExamHistory(resolveAlmaesamiContext(inputCookies, base_url));
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await getExamHistory(resolveAlmaesamiContext(session_id, inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data
@@ -527,12 +764,13 @@ server.registerTool(
     description:
       "Reads the authenticated student's AlmaEsami messages (subject, sender, received date, related appello). Read-only; does not delete messages.",
     inputSchema: {
+      session_id: almaesamiSessionIdSchema,
       cookies: almaesamiCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
-  async ({ cookies: inputCookies, base_url }) => {
-    const data = await getMessages(resolveAlmaesamiContext(inputCookies, base_url));
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await getMessages(resolveAlmaesamiContext(session_id, inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data
@@ -545,19 +783,25 @@ const rpsCookiesSchema = z
   .min(1)
   .optional()
   .describe(
-    "Cookie header with an authenticated PHPSESSID from a logged-in RPS browser session. Falls back to RPS_COOKIES."
+    "Cookie header with an authenticated PHPSESSID from a logged-in RPS browser session. Falls back to session_id, then RPS_COOKIES."
   );
+const rpsSessionIdSchema = z.string().min(1).optional().describe("session_id from rps_get_env_session.");
 
-function resolveRpsContext(inputCookies?: string, baseUrlOverride?: string): {
+function resolveRpsContext(sessionId?: string, inputCookies?: string, baseUrlOverride?: string): {
   cookies: string;
   baseUrl: string;
 } {
-  const cookieHeader = inputCookies ?? rpsCookies;
-  if (!cookieHeader) {
-    throw new Error("No RPS session available. Pass `cookies` (PHPSESSID=...) or set RPS_COOKIES.");
-  }
-  return { cookies: cookieHeader, baseUrl: baseUrlOverride ?? rpsBaseUrl };
+  return resolveCookieSession("rps", sessionId, inputCookies, rpsCookies, baseUrlOverride, rpsBaseUrl, "RPS_COOKIES");
 }
+
+registerEnvCookieSessionTool({
+  toolName: "rps_get_env_session",
+  title: "Get RPS Env-Backed Session",
+  service: "rps",
+  envCookies: rpsCookies,
+  baseUrl: rpsBaseUrl,
+  envVarName: "RPS_COOKIES"
+});
 
 server.registerTool(
   "rps_get_attendance_records",
@@ -566,12 +810,13 @@ server.registerTool(
     description:
       "Reads the authenticated student's RPS attendance records (Rilevazioni): date, subject, lecturer, and lesson duration for each recorded presence. Read-only.",
     inputSchema: {
+      session_id: rpsSessionIdSchema,
       cookies: rpsCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
-  async ({ cookies: inputCookies, base_url }) => {
-    const data = await getAttendanceRecords(resolveRpsContext(inputCookies, base_url));
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await getAttendanceRecords(resolveRpsContext(session_id, inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data
@@ -586,12 +831,13 @@ server.registerTool(
     description:
       "Reads the authenticated student's RPS attendance register (Registro): per-subject hours attended and attendance percentage. Read-only.",
     inputSchema: {
+      session_id: rpsSessionIdSchema,
       cookies: rpsCookiesSchema,
       base_url: z.string().url().optional()
     }
   },
-  async ({ cookies: inputCookies, base_url }) => {
-    const data = await getRegister(resolveRpsContext(inputCookies, base_url));
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await getRegister(resolveRpsContext(session_id, inputCookies, base_url));
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       structuredContent: data
