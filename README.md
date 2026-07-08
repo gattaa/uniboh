@@ -49,14 +49,17 @@ npm run dev
 | `ALMAESAMI_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for the `almaesami_*` tools. |
 | `RPS_BASE_URL` | no (defaults to `https://rps.unibo.it`) | RPS base URL. |
 | `RPS_COOKIES` | no | Cookie header with an authenticated `PHPSESSID`; fallback for the `rps_*` tools. |
+| `EMAIL` | no | Unibo SSO email; with `PASSWORD`, enables `virtuale_browser_login` (headless-Chromium ADFS login). Shared across services since they all federate to the same idp.unibo.it SSO. |
+| `PASSWORD` | no | Unibo SSO password. Only works for accounts without interactive MFA. |
 
 ## Authentication
 
-Authenticated Virtuale tools need both a `sesskey` and a cookie header. Three ways to provide them:
+Authenticated Virtuale tools need both a `sesskey` and a cookie header. Four ways to provide them:
 
 1. **`VIRTUALE_SESSKEY` + `VIRTUALE_COOKIES` env vars** — set once at startup.
-2. **`virtuale_bootstrap_session`** — paste a `sesskey` + cookies grabbed from a logged-in browser; returns a `session_id`. **This is the most reliable path** for accounts behind Unibo SSO/MFA.
-3. **`virtuale_login_with_password`** — best-effort form login. It scrapes the Moodle login form and posts credentials. This **will fail for accounts on federated SSO/MFA** (most Unibo accounts); prefer bootstrap for those.
+2. **`EMAIL` + `PASSWORD` env vars, via `virtuale_browser_login`** — drives a real headless Chromium through Unibo's ADFS SSO flow (Home Realm Discovery → AD login) and captures the resulting sesskey/cookies automatically. **Only works for accounts without interactive MFA.** See [`scripts/test-browser-login.mjs`](scripts/test-browser-login.mjs) to verify your account works before wiring it into an MCP client.
+3. **`virtuale_bootstrap_session`** — paste a `sesskey` + cookies grabbed from a logged-in browser; returns a `session_id`. **The reliable path for accounts with MFA.**
+4. **`virtuale_login_with_password`** — best-effort direct form login (no browser). This **will fail for accounts on federated SSO** (most Unibo accounts); prefer options 2 or 3.
 
 Session data is kept in server memory only and is never written to disk. Treat `sesskey` + cookies as account-bound secrets.
 
@@ -64,7 +67,7 @@ Session data is kept in server memory only and is never written to disk. Treat `
 
 If credentials are set via env vars (`VIRTUALE_SESSKEY`/`VIRTUALE_COOKIES`, `ALMAESAMI_COOKIES`, `RPS_COOKIES`), every tool already falls back to them silently when a call omits `cookies`/`session_id` — the model never has to see or pass the secret at all.
 
-If you'd rather the model work with an explicit handle instead of an invisible fallback, call the corresponding env-session tool first — `virtuale_get_env_session`, `almaesami_get_env_session`, or `rps_get_env_session` — each takes no input, reads its env var(s) server-side, and returns only an opaque `session_id` (idempotent: repeat calls return the same id). Pass that `session_id` to the other tools for that service. The underlying `sesskey`/cookie is never included in any of these responses.
+If you'd rather the model work with an explicit handle instead of an invisible fallback, call the corresponding env-session tool first — `virtuale_get_env_session`, `almaesami_get_env_session`, `rps_get_env_session`, or (if you'd rather store an SSO password than a pre-captured sesskey/cookie) `virtuale_browser_login` — each takes no input, reads its env var(s) server-side, and returns only an opaque `session_id` (idempotent: repeat calls return the same id). Pass that `session_id` to the other tools for that service. The underlying secret is never included in any of these responses.
 
 This only covers a single account per service. `virtuale_bootstrap_session` and `virtuale_login_with_password` still take credentials as tool input (by design, since you're supplying them inline), so those do pass through the model's context.
 
@@ -74,6 +77,7 @@ This only covers a single account per service. `virtuale_bootstrap_session` and 
 - `virtuale_login_with_password` — form login → stores session, returns `session_id`.
 - `virtuale_bootstrap_session` — build a session from an existing `sesskey` + cookies.
 - `virtuale_get_env_session` — mint/reuse a `session_id` from `VIRTUALE_SESSKEY`/`VIRTUALE_COOKIES` without ever returning the secret. See [Keeping secrets out of the model's context](#keeping-secrets-out-of-the-models-context).
+- `virtuale_browser_login` — mint/reuse a `session_id` by driving a headless Chromium through ADFS SSO with `EMAIL`/`PASSWORD`; never returns the password/sesskey/cookies. No interactive-MFA support.
 - `virtuale_get_session_info` — stored session metadata (optionally the sesskey/cookie header).
 - `virtuale_logout_session` — drop one session from memory.
 - `virtuale_health_check` — no-login `core_get_string` probe for connectivity.

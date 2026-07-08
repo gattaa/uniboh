@@ -16,7 +16,7 @@ export type PasswordLoginResult = {
   finalUrl: string;
 };
 
-function extractSesskey(html: string): string | null {
+export function extractSesskey(html: string): string | null {
   const patterns = [
     /"sesskey"\s*:\s*"([^"]+)"/,
     /M\.cfg\.sesskey\s*=\s*'([^']+)'/,

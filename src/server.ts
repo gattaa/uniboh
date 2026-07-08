@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { VirtualeClient } from "./virtualeClient.js";
 import { loginWithPassword } from "./login.js";
+import { loginWithBrowser } from "./browserAuth.js";
 import {
   eventsToIcs,
   listCurricula,
@@ -19,6 +20,10 @@ import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
 const cookies = process.env.VIRTUALE_COOKIES;
+// Shared across all Unibo services (Virtuale, AlmaEsami, RPS all federate to the
+// same idp.unibo.it ADFS SSO), so this is a generic credential, not Virtuale-specific.
+const ssoEmail = process.env.EMAIL;
+const ssoPassword = process.env.PASSWORD;
 
 const almaesamiBaseUrl = process.env.ALMAESAMI_BASE_URL ?? "https://almaesami.unibo.it";
 const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
@@ -221,6 +226,56 @@ server.registerTool(
     virtualeEnvSessionId = id;
 
     const out = { session_id: id, base_url: baseUrl, created_at: now };
+    return {
+      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+      structuredContent: out
+    };
+  }
+);
+
+let virtualeBrowserSessionId: string | undefined;
+
+server.registerTool(
+  "virtuale_browser_login",
+  {
+    title: "Log In Via Headless Browser",
+    description:
+      "Drives a real (headless) Chromium browser through the ADFS SSO login using EMAIL + PASSWORD from the server environment, then stores the resulting session and returns an opaque session_id — the password, sesskey, and cookies never pass through the model's context. Only works for accounts without interactive MFA; fails with a clear error otherwise (use virtuale_bootstrap_session instead for MFA accounts). Mints once and reuses the session on later calls unless force_relogin is set.",
+    inputSchema: {
+      force_relogin: z.boolean().default(false)
+    }
+  },
+  async ({ force_relogin }) => {
+    if (!ssoEmail || !ssoPassword) {
+      throw new Error("EMAIL and PASSWORD are not both set in the server environment.");
+    }
+
+    const existing = !force_relogin && virtualeBrowserSessionId ? sessions.get(virtualeBrowserSessionId) : undefined;
+    if (existing) {
+      existing.updatedAtIso = new Date().toISOString();
+      const out = { session_id: existing.id, base_url: baseUrl, created_at: existing.createdAtIso, reused: true };
+      return {
+        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
+        structuredContent: out
+      };
+    }
+
+    const login = await loginWithBrowser({ baseUrl, email: ssoEmail, password: ssoPassword });
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    sessions.set(id, {
+      id,
+      email: ssoEmail,
+      sesskey: login.sesskey,
+      cookies: login.cookies,
+      createdAtIso: now,
+      updatedAtIso: now,
+      client: new VirtualeClient({ baseUrl, sesskey: login.sesskey, cookies: login.cookies })
+    });
+    virtualeBrowserSessionId = id;
+
+    const out = { session_id: id, base_url: baseUrl, created_at: now, reused: false };
     return {
       content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
       structuredContent: out
