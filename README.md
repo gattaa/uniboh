@@ -147,6 +147,12 @@ authenticated `JSESSIONID`), or falls back to `ALMAESAMI_COOKIES`.
 - `almaesami_get_exam_history` — the exam history / cronologia (appello date, examiner,
   type/mode, status).
 - `almaesami_get_messages` — student messages (subject, sender, date, related appello).
+- `almaesami_list_appelli` — upcoming exam sessions (appelli): date/time, activity, examiner,
+  type/mode, enrollment window, and a `bookable` flag — to answer "when can I sit exam X".
+  **The endpoint/grid is UNVERIFIED** (it lives behind SSO and could not be confirmed against a
+  live session): the result carries `unverified: true`, the parser reads fields by content so it
+  tolerates layout changes, and the endpoint `path` is overridable. If it returns nothing, fall
+  back to the `bookable` flags on `almaesami_get_exam_plan`.
 
 These never mutate state: booking an exam ("prenota") and deleting messages ("Cancella")
 are intentionally not automated.

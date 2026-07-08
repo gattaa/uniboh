@@ -12,7 +12,7 @@ import {
   listTeachings,
   resolveTimetableUrl
 } from "./calendar.js";
-import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
+import { getExamPlan, getExamHistory, getMessages, getAppelli } from "./almaesami.js";
 import { getAttendanceRecords, getRegister } from "./rps.js";
 import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
 import { buildFileListing, getResource } from "./virtualeFiles.js";
@@ -905,6 +905,33 @@ server.registerTool(
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
     const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) => getMessages(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
+  }
+);
+
+server.registerTool(
+  "almaesami_list_appelli",
+  {
+    title: "List AlmaEsami Appelli (Exam Sessions)",
+    description:
+      "Lists the student's upcoming AlmaEsami appelli (bookable exam sessions): date/time, activity, examiner, type/mode, and enrollment window — to answer \"when can I sit exam X\". Read-only: it never books. NOTE: the underlying endpoint/grid is UNVERIFIED (it lives behind SSO and could not be confirmed live); the result carries `unverified: true`, and the parser reads fields by content so it tolerates layout changes. If it returns nothing, the exam-plan tool's `bookable` flags are the confirmed signal, or pass an explicit `path`.",
+    inputSchema: {
+      session_id: almaesamiSessionIdSchema,
+      cookies: almaesamiCookiesSchema,
+      base_url: z.string().url().optional(),
+      path: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Override for the appelli-list endpoint path (default /almaesami/studenti/appelloStudente-list.htm, which is UNVERIFIED). Provide the real route if known."
+        )
+    }
+  },
+  async ({ session_id, cookies: inputCookies, base_url, path }) => {
+    const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) =>
+      getAppelli({ ...ctx, path })
+    );
     return textResult(data as unknown as Record<string, unknown>);
   }
 );

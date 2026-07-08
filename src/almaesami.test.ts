@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseExamPlan, parseExamHistory, parseMessages } from "./almaesami.js";
+import { parseExamPlan, parseExamHistory, parseMessages, parseAppelli } from "./almaesami.js";
 
 // Synthetic fixture mirroring the AlmaEsami "Riepilogo Esami" grid structure.
 // (Real student data is never committed.)
@@ -143,4 +143,98 @@ test("parseMessages maps subject, sender, date and appello reference", () => {
 test("parseMessages skips rows without a subject", () => {
   const { messages } = parseMessages(grid(row(["", "ref", "01/01/2026 00:00", "", "Sender", "Leggi", "Cancella"])));
   assert.equal(messages.length, 0);
+});
+
+// --- Appelli (upcoming exam sessions) ---------------------------------------
+// NOTE: the appelli endpoint/grid is UNVERIFIED (behind SSO). These fixtures are
+// synthesized from the documented iceDataTblOutline structure and the
+// content-driven parser's contract — no real student data. The parser reads
+// fields by content, so these also assert its layout-independence.
+
+test("parseAppelli extracts date, activity, examiner, type/mode, enrollment, bookable", () => {
+  const html = grid(
+    row([
+      "+",
+      "19/02/2026 09:30",
+      "84252 CHEMISTRY AND BIOCHEMISTRY (I.C.) (Cds. 6734)",
+      "CALICETI CRISTIANA",
+      "prova",
+      "Scritto",
+      "dal 01/02/2026 al 18/02/2026",
+      "prenota"
+    ])
+  );
+  const { entries } = parseAppelli(html);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], {
+    datetime: "19/02/2026 09:30",
+    code: "84252",
+    name: "CHEMISTRY AND BIOCHEMISTRY (I.C.)",
+    cds: "6734",
+    teacher: "CALICETI CRISTIANA",
+    type: "prova",
+    mode: "Scritto",
+    enrollmentOpens: "01/02/2026",
+    enrollmentCloses: "18/02/2026",
+    bookable: true
+  });
+});
+
+test("parseAppelli is layout-independent (columns reordered)", () => {
+  // Same fields, shuffled column order — content-driven extraction still works.
+  const html = grid(
+    row([
+      "ROSSI MARIO",
+      "84280 MORPHOLOGY",
+      "Orale",
+      "27/06/2026 14:00",
+      "listaAperta",
+      "dal 01/06/2026 08:00 al 25/06/2026 23:59"
+    ])
+  );
+  const { entries } = parseAppelli(html);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], {
+    datetime: "27/06/2026 14:00",
+    code: "84280",
+    name: "MORPHOLOGY",
+    cds: "",
+    teacher: "ROSSI MARIO",
+    type: "listaAperta",
+    mode: "Orale",
+    enrollmentOpens: "01/06/2026 08:00",
+    enrollmentCloses: "25/06/2026 23:59",
+    bookable: false
+  });
+});
+
+test("parseAppelli does not mistake the enrollment window for the appello date", () => {
+  const { entries } = parseAppelli(
+    grid(row(["04/07/2026 10:00", "12345 ANATOMY", "BIANCHI L", "prova", "Orale", "dal 01/07/2026 al 03/07/2026"]))
+  );
+  assert.equal(entries[0].datetime, "04/07/2026 10:00");
+  assert.equal(entries[0].enrollmentOpens, "01/07/2026");
+});
+
+test("parseAppelli tolerates a missing enrollment window", () => {
+  const { entries } = parseAppelli(
+    grid(row(["10/09/2026 09:00", "C0233 PHILOSOPHY OF MEDICINE", "VERDI G", "prova", "Scritto"]))
+  );
+  assert.equal(entries[0].enrollmentOpens, "");
+  assert.equal(entries[0].enrollmentCloses, "");
+  assert.equal(entries[0].code, "C0233");
+});
+
+test("parseAppelli skips header/spacer rows without an activity", () => {
+  const html = grid(
+    "<tr><th>Data</th><th>Insegnamento</th><th>Docente</th><th>Tipo</th></tr>" +
+      row(["05/05/2026 09:00", "84276 CELLULAR BIOLOGY", "NERI A", "prova", "Orale"])
+  );
+  const { entries } = parseAppelli(html);
+  assert.equal(entries.length, 1);
+});
+
+test("parseAppelli throws on an expired/SSO session like the other readers", () => {
+  const expired = "<html><head><title>AlmaEsami - sessione scaduta</title></head><body>sessionExpired</body></html>";
+  assert.throws(() => parseAppelli(expired), /expired|scaduta|SSO/i);
 });

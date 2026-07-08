@@ -21,6 +21,26 @@ const EXAM_PLAN_PATH = "/almaesami/studenti/attivitaFormativaPiano-list.htm";
 const EXAM_HISTORY_PATH = "/almaesami/studenti/cronologia-list.htm";
 const MESSAGES_PATH = "/almaesami/studenti/messaggioStudente.htm";
 
+/**
+ * Endpoint for the upcoming-appelli list (bookable exam sessions / "cerca
+ * appelli").
+ *
+ * UNVERIFIED — unlike the three endpoints above, this path could NOT be
+ * confirmed from a live session. Unauthenticated probing on 2026-07-08 showed
+ * the AlmaEsami servlet gates the whole `/almaesami/studenti/` tree behind ADFS
+ * SSO *before* routing: every `studenti/*.htm` name — real or invented — returns
+ * `302 -> idp.unibo.it/adfs`, so the exact route name cannot be distinguished
+ * without a valid `JSESSIONID` (which we don't have). This default follows the
+ * documented `<entity>-list.htm` Spring Web Flow convention and the "prenota"
+ * action the exam plan already exposes. A caller who knows the real route can
+ * override it via the `path` argument (see the `almaesami_list_appelli` tool).
+ *
+ * The parser below is deliberately layout-independent (it identifies fields by
+ * content, not fixed column offsets) precisely because the grid's column order
+ * is likewise unverified.
+ */
+const APPELLI_PATH = "/almaesami/studenti/appelloStudente-list.htm";
+
 export type ExamPlanEntry = {
   /** Course year the activity belongs to, e.g. "1". */
   year: string;
@@ -68,6 +88,29 @@ export type StudentMessage = {
   subject: string;
   /** Sender name. */
   sender: string;
+};
+
+export type AppelloEntry = {
+  /** Exam-session (appello) date/time as shown, e.g. "19/02/2026 09:30". */
+  datetime: string;
+  /** Activity (insegnamento) code, e.g. "84252". */
+  code: string;
+  /** Activity name, e.g. "CHEMISTRY AND BIOCHEMISTRY (I.C.)". */
+  name: string;
+  /** Course-of-study (CdS) code when present, e.g. "6734". */
+  cds: string;
+  /** Examiner / lead teacher, e.g. "CALICETI CRISTIANA". */
+  teacher: string;
+  /** Appello type, e.g. "prova", "listaAperta". */
+  type: string;
+  /** Exam mode, e.g. "Scritto", "Orale", "Altro". */
+  mode: string;
+  /** Enrollment window opening as shown, e.g. "01/02/2026" (empty if absent). */
+  enrollmentOpens: string;
+  /** Enrollment window closing as shown, e.g. "18/02/2026" (empty if absent). */
+  enrollmentCloses: string;
+  /** True when the row exposes a "prenota" (book) action. We never book. */
+  bookable: boolean;
 };
 
 /**
@@ -212,6 +255,88 @@ export function parseMessages(html: string, url = ""): { messages: StudentMessag
   return { messages };
 }
 
+// --- Appelli (upcoming exam sessions) — content-driven, layout-independent ---
+//
+// The appelli grid's exact column order is UNVERIFIED (see APPELLI_PATH), so
+// rather than trust fixed offsets we recognise each field by its content shape.
+// This tolerates column reordering and optional columns across CdS/course
+// configurations.
+
+/** A date, optionally with an HH:MM time, as AlmaEsami renders them. */
+const DATE_RE = /\b\d{2}\/\d{2}\/\d{4}(?:\s+\d{2}:\d{2})?\b/;
+/** Enrollment window "dal <date> al <date>" (times optional). */
+const ENROLL_RE =
+  /\bdal\s+(\d{2}\/\d{2}\/\d{4}(?:\s+\d{2}:\d{2})?)\s+al\s+(\d{2}\/\d{2}\/\d{4}(?:\s+\d{2}:\d{2})?)/i;
+/** Appello type keywords (rendered variants of prova / listaAperta / appello). */
+const TYPE_RE = /\b(lista\s*aperta|listaAperta|prova\s+parziale|prova|appello)\b/i;
+/** Exam-mode keywords. */
+const MODE_RE = /\b(scritto\s+e\s+orale|scritto|orale|pratico|colloquio|altro)\b/i;
+/** Leading course-code token: a 4–6 digit code or a letter-prefixed code (C0233). */
+const CODE_TOKEN_RE = /^([0-9]{4,6}|[A-Z]{1,3}[0-9]{3,5})\b/;
+
+/** A cell that starts with a course code and carries an alphabetic name. */
+function looksLikeActivity(cell: string): boolean {
+  if (!CODE_TOKEN_RE.test(cell)) return false;
+  return /[A-Za-z]{3,}/.test(cell.replace(CODE_TOKEN_RE, ""));
+}
+
+/** A cell that looks like an examiner name: two+ all-caps tokens, no digits. */
+function looksLikeTeacher(cell: string): boolean {
+  return /^[A-ZÀ-Þ][A-ZÀ-Þ'.\-]*(?:\s+[A-ZÀ-Þ'.\-]+)+$/.test(cell);
+}
+
+/**
+ * Parse the upcoming-appelli grid into one entry per exam session. Pure/testable.
+ *
+ * Fields are extracted by content, not column position (the layout is
+ * UNVERIFIED). Rows without a recognisable activity cell (headers, spacers) are
+ * skipped. Strictly read-only: a "prenota" action only sets {@link
+ * AppelloEntry.bookable}; nothing here books.
+ */
+export function parseAppelli(html: string): { entries: AppelloEntry[] } {
+  const entries: AppelloEntry[] = [];
+
+  for (const cells of readGridRows(html)) {
+    const activityCell = cells.find(looksLikeActivity);
+    if (!activityCell) {
+      continue;
+    }
+    const { code, name, cds } = splitActivityWithCds(activityCell);
+
+    const rowText = cells.join(" ");
+    const enroll = ENROLL_RE.exec(rowText);
+
+    // Appello datetime: the first date-bearing cell that is neither the activity
+    // cell nor part of the "dal … al …" enrollment window.
+    let datetime = "";
+    for (const cell of cells) {
+      if (cell === activityCell || /\bdal\b/i.test(cell)) continue;
+      const m = DATE_RE.exec(cell);
+      if (m) {
+        datetime = m[0];
+        break;
+      }
+    }
+
+    const teacher = cells.find((c) => c !== activityCell && looksLikeTeacher(c)) ?? "";
+
+    entries.push({
+      datetime,
+      code,
+      name,
+      cds,
+      teacher,
+      type: (TYPE_RE.exec(rowText)?.[0] ?? "").trim(),
+      mode: (MODE_RE.exec(rowText)?.[0] ?? "").trim(),
+      enrollmentOpens: enroll?.[1] ?? "",
+      enrollmentCloses: enroll?.[2] ?? "",
+      bookable: /prenota/i.test(rowText)
+    });
+  }
+
+  return { entries };
+}
+
 async function fetchStudentPage(
   path: string,
   input: { cookies: string; baseUrl?: string }
@@ -259,4 +384,28 @@ export async function getMessages(input: {
   const { url, html } = await fetchStudentPage(MESSAGES_PATH, input);
   const { messages } = parseMessages(html, url);
   return { endpoint: url, total: messages.length, messages };
+}
+
+/**
+ * Fetch and parse the authenticated student's upcoming appelli (exam sessions).
+ *
+ * `path` defaults to {@link APPELLI_PATH} but is overridable because that route
+ * is UNVERIFIED (see its doc comment). `unverified: true` is surfaced in the
+ * result so callers/agents know this reader has not been confirmed against a
+ * live session — an empty `entries` list may mean "no appelli" OR "wrong route
+ * / unexpected grid". Read-only: never books.
+ */
+export async function getAppelli(input: {
+  cookies: string;
+  baseUrl?: string;
+  path?: string;
+}): Promise<{
+  endpoint: string;
+  total: number;
+  entries: AppelloEntry[];
+  unverified: true;
+}> {
+  const { url, html } = await fetchStudentPage(input.path ?? APPELLI_PATH, input);
+  const { entries } = parseAppelli(html);
+  return { endpoint: url, total: entries.length, entries, unverified: true };
 }
