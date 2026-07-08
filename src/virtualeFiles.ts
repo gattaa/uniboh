@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { SessionExpiredError, VIRTUALE_EXPIRED_MESSAGE, isVirtualeAuthExpired } from "./sessions.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * virtuale.unibo.it (Moodle) course file / resource retrieval.
@@ -243,7 +244,7 @@ export async function getResource(
     throw new Error("save_to must be an absolute file path.");
   }
 
-  const res = await fetch(target, {
+  const res = await fetchWithTimeout(target, {
     redirect: "follow",
     headers: { Cookie: ctx.cookies }
   });

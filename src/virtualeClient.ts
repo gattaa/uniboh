@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "./http.js";
+
 export type ServiceCallResult = {
   error: boolean;
   exception?: string;
@@ -43,7 +45,7 @@ export class VirtualeClient {
       headers.Cookie = this.config.cookies;
     }
 
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTimeout(endpoint, {
       method: "POST",
       headers,
       body: JSON.stringify(body)
@@ -81,7 +83,7 @@ export class VirtualeClient {
       headers.Cookie = this.config.cookies;
     }
 
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTimeout(endpoint, {
       headers
     });
 

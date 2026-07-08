@@ -1,17 +1,26 @@
 {
   "name": "uniboh",
   "version": "1.0.0",
-  "description": "MCP server for University of Bologna services: Virtuale (Moodle) APIs and corsi.unibo.it timetable/ICS export.",
+  "description": "MCP server for University of Bologna services: Virtuale (Moodle), corsi.unibo.it timetable/ICS, AlmaEsami, RPS attendance, and Studenti Online.",
   "main": "dist/server.js",
   "bin": {
     "uniboh-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/server.ts",
     "start": "node dist/server.js",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "mcp",
@@ -20,7 +29,9 @@
     "moodle",
     "virtuale",
     "timetable",
-    "ics"
+    "ics",
+    "almaesami",
+    "studenti-online"
   ],
   "author": "gattaa",
   "license": "ISC",

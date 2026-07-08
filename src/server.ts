@@ -1,6 +1,10 @@
+#!/usr/bin/env node
 import { z } from "zod";
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 import { VirtualeClient, type ServiceCallResult } from "./virtualeClient.js";
 import { loginWithPassword } from "./login.js";
@@ -190,9 +194,14 @@ async function runCookieService<T>(
 }
 
 const server = new McpServer({
-  name: "unibo-virtuale-mcp",
-  version: "0.1.0"
+  name: "uniboh",
+  version: packageVersion
 });
+
+// Read-only tools that reach an external Unibo service. `readOnlyHint` lets a
+// client skip a confirmation prompt; `openWorldHint` marks that they call out
+// to a remote whose responses aren't fully predictable.
+const READONLY = { readOnlyHint: true, openWorldHint: true } as const;
 
 // --- Session management ------------------------------------------------------
 
@@ -396,6 +405,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_get_session_info",
   {
+    annotations: READONLY,
     title: "Get Session Info",
     description: "Shows stored login metadata and optionally returns cookie header string.",
     inputSchema: {
@@ -451,6 +461,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_health_check",
   {
+    annotations: READONLY,
     title: "Virtuale Health Check",
     description: "Runs a safe no-login Moodle AJAX call to validate base connectivity.",
     inputSchema: {}
@@ -475,6 +486,7 @@ server.registerTool(
 server.registerTool(
   "unibo_calendar_resolve_timetable_url",
   {
+    annotations: READONLY,
     title: "Resolve Timetable URL",
     description: "Resolves the corsi.unibo.it timetable URL from a unibo.it course page URL.",
     inputSchema: {
@@ -490,6 +502,7 @@ server.registerTool(
 server.registerTool(
   "unibo_calendar_list_curricula",
   {
+    annotations: READONLY,
     title: "List Available Curricula",
     description: "Lists available curricula for a timetable URL.",
     inputSchema: {
@@ -505,6 +518,7 @@ server.registerTool(
 server.registerTool(
   "unibo_calendar_list_teachings",
   {
+    annotations: READONLY,
     title: "List Teachings",
     description: "Parses timetable page HTML and returns lecture/teaching IDs for filtering.",
     inputSchema: {
@@ -522,6 +536,7 @@ server.registerTool(
 server.registerTool(
   "unibo_calendar_get_events",
   {
+    annotations: READONLY,
     title: "Get Timetable Events",
     description: "Fetches raw timetable events from @@orario_reale_json with optional teaching-code filtering.",
     inputSchema: {
@@ -545,6 +560,7 @@ server.registerTool(
 server.registerTool(
   "unibo_calendar_get_ics",
   {
+    annotations: READONLY,
     title: "Get Timetable ICS",
     description: "Fetches timetable events and returns an ICS calendar string.",
     inputSchema: {
@@ -583,6 +599,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_get_enrolled_courses",
   {
+    annotations: READONLY,
     title: "Get Enrolled Courses",
     description: "Calls local_uniboapi_get_enrolled_courses_unibo for the authenticated user.",
     inputSchema: {
@@ -612,6 +629,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_get_course_state",
   {
+    annotations: READONLY,
     title: "Get Course State",
     description: "Calls core_courseformat_get_state and parses the returned JSON string state model.",
     inputSchema: {
@@ -640,6 +658,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_list_course_files",
   {
+    annotations: READONLY,
     title: "List Course Files",
     description:
       "Lists the downloadable files/resources of a Virtuale course, grouped by section (cmid, name, modname, url), derived from core_courseformat_get_state. A slim, token-friendly view of the course contents (not the full state blob); pass a cmid to virtuale_get_resource to fetch a file's content. Read-only.",
@@ -670,6 +689,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_get_panopto_content",
   {
+    annotations: READONLY,
     title: "Get Panopto Block Content",
     description: "Calls block_panopto_get_content for a course.",
     inputSchema: {
@@ -696,6 +716,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_quiz_list_course_quizzes",
   {
+    annotations: READONLY,
     title: "List Course Quizzes",
     description: "Lists quiz activities on a course page, with the course-module id (cmid) needed by the other quiz tools.",
     inputSchema: {
@@ -716,6 +737,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_quiz_list_attempts",
   {
+    annotations: READONLY,
     title: "List Quiz Attempts",
     description:
       "Reads a quiz activity page and returns the student's attempt summaries (status, dates, marks, grade) plus a review URL/attempt id for each finished attempt. Read-only.",
@@ -735,6 +757,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_quiz_get_attempt_review",
   {
+    annotations: READONLY,
     title: "Get Quiz Attempt Review",
     description:
       "Reads the review page of one of the student's own finished quiz attempts: each question's text, answer options, the student's selection, correctness, and feedback. Only works for attempts Moodle already allows the student to review (finished, review permitted by the quiz settings) — it does not start, resume, or answer a live attempt.",
@@ -757,6 +780,7 @@ server.registerTool(
 server.registerTool(
   "virtuale_get_resource",
   {
+    annotations: READONLY,
     title: "Get Course Resource / File",
     description:
       "Fetches a Virtuale file/resource by cmid (builds /mod/resource/view.php?id=<cmid>) or an explicit url, following the redirect to the protected pluginfile.php content with the authenticated MoodleSession cookie. Always returns metadata (final URL, content-type, size, filename). If save_to (an absolute file path) is given, streams the file to disk and returns the path + byte size. Otherwise returns text inline for text-like files (text/JSON/XML/HTML) and extracts + returns the text of PDFs; very long text is truncated (pass save_to for the full file). Read-only.",
@@ -878,6 +902,7 @@ registerEnvCookieSessionTool({
 server.registerTool(
   "almaesami_get_exam_plan",
   {
+    annotations: READONLY,
     title: "Get AlmaEsami Exam Plan",
     description:
       "Reads the authenticated student's AlmaEsami exam plan (Riepilogo Esami): activities, CFU, status, and whether each is bookable. Read-only; does not book exams.",
@@ -896,6 +921,7 @@ server.registerTool(
 server.registerTool(
   "almaesami_get_exam_history",
   {
+    annotations: READONLY,
     title: "Get AlmaEsami Exam History",
     description:
       "Reads the authenticated student's AlmaEsami exam history (Cronologia): appello date, activity, examiner, type/mode, and status. Read-only.",
@@ -914,6 +940,7 @@ server.registerTool(
 server.registerTool(
   "almaesami_get_messages",
   {
+    annotations: READONLY,
     title: "Get AlmaEsami Messages",
     description:
       "Reads the authenticated student's AlmaEsami messages (subject, sender, received date, related appello). Read-only; does not delete messages.",
@@ -932,6 +959,7 @@ server.registerTool(
 server.registerTool(
   "almaesami_list_appelli",
   {
+    annotations: READONLY,
     title: "List AlmaEsami Appelli (Exam Sessions)",
     description:
       "Lists the student's upcoming AlmaEsami appelli (bookable exam sessions): date/time, activity, examiner, type/mode, and enrollment window — to answer \"when can I sit exam X\". Read-only: it never books. NOTE: the underlying endpoint/grid is UNVERIFIED (it lives behind SSO and could not be confirmed live); the result carries `unverified: true`, and the parser reads fields by content so it tolerates layout changes. If it returns nothing, the exam-plan tool's `bookable` flags are the confirmed signal, or pass an explicit `path`.",
@@ -987,6 +1015,7 @@ registerEnvCookieSessionTool({
 server.registerTool(
   "rps_get_attendance_records",
   {
+    annotations: READONLY,
     title: "Get RPS Attendance Records",
     description:
       "Reads the authenticated student's RPS attendance records (Rilevazioni): date, subject, lecturer, and lesson duration for each recorded presence. Read-only.",
@@ -1005,6 +1034,7 @@ server.registerTool(
 server.registerTool(
   "rps_get_register",
   {
+    annotations: READONLY,
     title: "Get RPS Attendance Register",
     description:
       "Reads the authenticated student's RPS attendance register (Registro): per-subject hours attended and attendance percentage. Read-only.",
@@ -1053,6 +1083,7 @@ registerEnvCookieSessionTool({
 server.registerTool(
   "sol_get_career",
   {
+    annotations: READONLY,
     title: "Get Studenti Online Career Summary",
     description:
       "Reads the authenticated student's Studenti Online (studenti.unibo.it) home page into a career summary: greeting/identity, enrolled course of study, and in-progress requests. Read-only; never submits requests or payments. NOTE: parsed from a single logged-in capture — selectors are best-effort and individual fields degrade to empty rather than failing.",
@@ -1071,6 +1102,7 @@ server.registerTool(
 server.registerTool(
   "sol_get_services",
   {
+    annotations: READONLY,
     title: "List Studenti Online Services",
     description:
       "Lists the Studenti Online service tiles available to the student (name, link, description) — e.g. fees/payments, enrolments, certificates — so a caller can discover what the portal exposes. Read-only; it lists links, it does not act on them.",

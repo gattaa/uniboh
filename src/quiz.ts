@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 
 import { SessionExpiredError, VIRTUALE_EXPIRED_MESSAGE, isVirtualeAuthExpired } from "./sessions.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * virtuale.unibo.it (Moodle) quiz review scrapers.
@@ -61,7 +62,7 @@ async function fetchPage(path: string, input: { cookies: string; baseUrl?: strin
   const baseUrl = input.baseUrl ?? DEFAULT_BASE_URL;
   const endpoint = new URL(path, baseUrl).toString();
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     redirect: "follow",
     headers: { Cookie: input.cookies }
   });

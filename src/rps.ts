@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 
 import { RPS_EXPIRED_MESSAGE, SessionExpiredError, isRpsAuthExpired } from "./sessions.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * RPS — "Registro Presenze Studenti" (rps.unibo.it), the Unibo student
@@ -126,7 +127,7 @@ async function fetchStudentPage(
   const baseUrl = input.baseUrl ?? DEFAULT_BASE_URL;
   const endpoint = new URL(path, baseUrl).toString();
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     redirect: "follow",
     headers: { Cookie: input.cookies }
   });

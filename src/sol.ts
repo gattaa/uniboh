@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 
 import { SOL_EXPIRED_MESSAGE, SessionExpiredError, isSolAuthExpired } from "./sessions.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * Studenti Online — "SOL" (studenti.unibo.it), the Unibo student-services
@@ -199,7 +200,7 @@ async function fetchHomePage(input: {
   const baseUrl = input.baseUrl ?? DEFAULT_BASE_URL;
   const endpoint = new URL(HOME_PATH, baseUrl).toString();
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     redirect: "follow",
     headers: { Cookie: input.cookies }
   });

@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 
 import { ALMAESAMI_EXPIRED_MESSAGE, SessionExpiredError, isAlmaesamiAuthExpired } from "./sessions.js";
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * AlmaEsami (almaesami.unibo.it) student read-only scrapers.
@@ -344,7 +345,7 @@ async function fetchStudentPage(
   const baseUrl = input.baseUrl ?? DEFAULT_BASE_URL;
   const endpoint = new URL(path, baseUrl).toString();
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithTimeout(endpoint, {
     redirect: "follow",
     headers: { Cookie: input.cookies }
   });

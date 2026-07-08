@@ -1,5 +1,7 @@
 import { load } from "cheerio";
 
+import { fetchWithTimeout } from "./http.js";
+
 export type LanguagePath = "orario-lezioni" | "timetable";
 
 export type CurriculaEntry = {
@@ -66,7 +68,7 @@ function getLanguagePath(type: string): LanguagePath {
 }
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, { redirect: "follow" });
+  const res = await fetchWithTimeout(url, { redirect: "follow" });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} while fetching ${url}`);
   }
@@ -74,7 +76,7 @@ async function fetchText(url: string): Promise<string> {
 }
 
 async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetch(url, { redirect: "follow" });
+  const res = await fetchWithTimeout(url, { redirect: "follow" });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} while fetching ${url}`);
   }
