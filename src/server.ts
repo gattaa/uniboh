@@ -15,6 +15,7 @@ import {
 import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
 import { getAttendanceRecords, getRegister } from "./rps.js";
 import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
+import { buildFileListing, getResource } from "./virtualeFiles.js";
 import {
   SessionExpiredError,
   SessionStore,
@@ -617,6 +618,36 @@ server.registerTool(
 );
 
 server.registerTool(
+  "virtuale_list_course_files",
+  {
+    title: "List Course Files",
+    description:
+      "Lists the downloadable files/resources of a Virtuale course, grouped by section (cmid, name, modname, url), derived from core_courseformat_get_state. A slim, token-friendly view of the course contents (not the full state blob); pass a cmid to virtuale_get_resource to fetch a file's content. Read-only.",
+    inputSchema: {
+      session_id: z.string().optional(),
+      courseid: z.number().int().positive()
+    }
+  },
+  async ({ session_id, courseid }) => {
+    const result = await callVirtualeService(
+      session_id,
+      "virtuale_list_course_files",
+      "core_courseformat_get_state",
+      { courseid }
+    );
+
+    const rawData = result.data;
+    const parsedState = typeof rawData === "string" ? JSON.parse(rawData) : rawData;
+    const listing = buildFileListing(parsedState);
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(listing, null, 2) }],
+      structuredContent: listing as unknown as Record<string, unknown>
+    };
+  }
+);
+
+server.registerTool(
   "virtuale_get_panopto_content",
   {
     title: "Get Panopto Block Content",
@@ -700,6 +731,35 @@ server.registerTool(
       getAttemptReview(attempt_id, cmid, ctx)
     );
     return textResult(data as unknown as Record<string, unknown>);
+  }
+);
+
+server.registerTool(
+  "virtuale_get_resource",
+  {
+    title: "Get Course Resource / File",
+    description:
+      "Fetches a Virtuale file/resource by cmid (builds /mod/resource/view.php?id=<cmid>) or an explicit url, following the redirect to the protected pluginfile.php content with the authenticated MoodleSession cookie. Always returns metadata (final URL, content-type, size, filename). If save_to (an absolute file path) is given, streams the file to disk and returns the path + byte size. Otherwise returns text inline for text-like files (text/JSON/XML/HTML) and extracts + returns the text of PDFs; very long text is truncated (pass save_to for the full file). Read-only.",
+    inputSchema: {
+      cmid: z.number().int().positive().optional(),
+      url: z.string().optional(),
+      save_to: z.string().min(1).optional(),
+      session_id: z.string().optional(),
+      cookies: z.string().min(1).optional(),
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ cmid, url, save_to, session_id, cookies: cookieOverride, base_url }) => {
+    if (cmid == null && !url) {
+      throw new Error("Provide either cmid or url.");
+    }
+    const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) =>
+      getResource({ cmid, url, saveTo: save_to }, ctx)
+    );
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      structuredContent: data as unknown as Record<string, unknown>
+    };
   }
 );
 

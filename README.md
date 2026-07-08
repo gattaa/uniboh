@@ -98,9 +98,20 @@ The `*_bootstrap_session` and `virtuale_login_with_password` tools still take cr
 ### Virtuale (authenticated)
 - `virtuale_get_enrolled_courses` — wraps `local_uniboapi_get_enrolled_courses_unibo`.
 - `virtuale_get_course_state` — wraps `core_courseformat_get_state`, parses the state JSON.
+- `virtuale_list_course_files` — slims `core_courseformat_get_state` down to the downloadable
+  files/resources, grouped by section (`cmid`, `name`, `modname`, `url`) — a token-friendly
+  view; feed a `cmid` to `virtuale_get_resource`.
 - `virtuale_get_panopto_content` — wraps `block_panopto_get_content`.
 
 Each accepts an optional `session_id`; if omitted, the env-var session is used.
+
+- `virtuale_get_resource` — fetches a course file/resource by `cmid` (builds
+  `/mod/resource/view.php?id=<cmid>`) or an explicit `url`, following the redirect to the
+  protected `pluginfile.php` content. Always returns metadata (final URL, content-type, size,
+  filename); with `save_to` (an absolute path) it streams the file to disk, otherwise it
+  returns text inline for text-like files and extracts + returns the text of PDFs (long text is
+  truncated — pass `save_to` for the full file). Accepts `session_id`, `cookies` (a header with
+  an authenticated `MoodleSession`), or falls back to `VIRTUALE_COOKIES`. Read-only.
 
 ### Virtuale quizzes (authenticated, read-only)
 `mod_quiz_*` isn't on the AJAX service allowlist, so these scrape the same HTML a browser
