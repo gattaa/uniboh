@@ -2,10 +2,11 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server (stdio transport, TypeScript) that exposes University of Bologna services to MCP clients. Today it covers:
 
-- **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API (enrolled courses, course state, Panopto content).
+- **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API (enrolled courses, course state, file/resource download, Panopto content).
 - **corsi.unibo.it** — public course timetables, normalized to events and exported as an ICS calendar.
-- **almaesami.unibo.it** — student exam plan, history, and messages, read-only.
+- **almaesami.unibo.it** — student exam plan, history, messages, and upcoming appelli, read-only.
 - **rps.unibo.it** — student attendance ("Presenze studenti"): records and register, read-only.
+- **studenti.unibo.it** — Studenti Online (SOL): career summary and service catalogue, read-only.
 
 The longer-term goal is to wrap **any Unibo service** behind one MCP server — see
 [CLAUDE.md](CLAUDE.md).
@@ -49,7 +50,9 @@ npm run dev
 | `ALMAESAMI_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for the `almaesami_*` tools. |
 | `RPS_BASE_URL` | no (defaults to `https://rps.unibo.it`) | RPS base URL. |
 | `RPS_COOKIES` | no | Cookie header with an authenticated `PHPSESSID`; fallback for the `rps_*` tools. |
-| `EMAIL` | no | Unibo SSO email; with `PASSWORD`, enables `unibo_browser_login` (headless-Chromium ADFS login for Virtuale + AlmaEsami + RPS) and transparent auto re-login on session expiry. Shared across services since they all federate to the same idp.unibo.it SSO. |
+| `SOL_BASE_URL` | no (defaults to `https://studenti.unibo.it`) | Studenti Online base URL. |
+| `SOL_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for the `sol_*` tools. |
+| `EMAIL` | no | Unibo SSO email; with `PASSWORD`, enables `unibo_browser_login` (headless-Chromium ADFS login for Virtuale + AlmaEsami + RPS + Studenti Online) and transparent auto re-login on session expiry. Shared across services since they all federate to the same idp.unibo.it SSO. |
 | `PASSWORD` | no | Unibo SSO password. Only works for accounts without interactive MFA. |
 
 ## Authentication
@@ -178,6 +181,25 @@ intentionally not automated. If `EMAIL`/`PASSWORD` are set (non-MFA account),
 `unibo_browser_login` captures the `PHPSESSID` automatically. Otherwise authenticate the
 bootstrap way: log fully into `rps.unibo.it`, confirm you see the app (not the SSO Sign In
 page), copy the `PHPSESSID` cookie, and hand it to `rps_bootstrap_session`.
+
+### Studenti Online — SOL (authenticated)
+All read-only. Each accepts `session_id` (from `sol_get_env_session`, `sol_bootstrap_session`,
+or `unibo_browser_login`) or `cookies` (a cookie header with an authenticated `JSESSIONID`),
+or falls back to `SOL_COOKIES`.
+
+- `sol_bootstrap_session` — mint a `session_id` from a pasted `JSESSIONID` cookie header (never echoed back).
+- `sol_get_env_session` — mint/reuse a `session_id` from `SOL_COOKIES` without ever returning the cookie.
+- `sol_get_career` — the student's home/career summary: greeting/identity, enrolled course of
+  study, and in-progress requests.
+- `sol_get_services` — the catalogue of Studenti Online service tiles (name, link,
+  description) — fees, certificates, enrolments, etc. — so a caller can discover what the
+  portal exposes.
+
+**First integration, partly unverified:** the `sol_*` readers were derived from a single
+logged-in home-page capture, so selectors are best-effort and individual fields degrade to
+empty rather than failing. Consequential pages behind the service tiles (paying fees, new
+enrolment/career requests, degree applications) mutate real state and are intentionally **not**
+automated. See [`sol-api-notes.md`](sol-api-notes.md).
 
 ### Calendar flow example
 1. `unibo_calendar_resolve_timetable_url` with the unibo.it course URL.

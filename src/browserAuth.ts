@@ -1,7 +1,7 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 
 import { extractSesskey } from "./login.js";
-import { isAlmaesamiAuthExpired, isRpsAuthExpired } from "./sessions.js";
+import { isAlmaesamiAuthExpired, isRpsAuthExpired, isSolAuthExpired } from "./sessions.js";
 
 /**
  * Headless Chromium login across the Unibo SSO estate. `/login/index.php` on
@@ -29,6 +29,7 @@ export type BrowserLoginInput = {
   password: string;
   almaesamiUrl?: string;
   rpsUrl?: string;
+  solUrl?: string;
   timeoutMs?: number;
 };
 
@@ -40,12 +41,14 @@ export type BrowserLoginResult = {
   virtuale: VirtualeCaptured | ServiceFailure;
   almaesami: CookieCaptured | ServiceFailure;
   rps: CookieCaptured | ServiceFailure;
+  sol: CookieCaptured | ServiceFailure;
 };
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_STEPS = 8;
 const DEFAULT_ALMAESAMI_URL = "https://almaesami.unibo.it/almaesami/studenti/home.htm";
 const DEFAULT_RPS_URL = "https://rps.unibo.it/";
+const DEFAULT_SOL_URL = "https://studenti.unibo.it/sol/studenti/homeStudentiOnline.htm";
 
 // Home Realm Discovery: pick the UNIBO (local AD) identity provider. The page
 // renders clickable `<div class="idp btnUnibo">` tiles that call
@@ -306,7 +309,14 @@ export async function loginWithBrowser(input: BrowserLoginInput): Promise<Browse
       rps = { ok: false, error: errorMessage(err) };
     }
 
-    return { virtuale, almaesami, rps };
+    let sol: CookieCaptured | ServiceFailure;
+    try {
+      sol = await captureCookieService(page, context, input.solUrl ?? DEFAULT_SOL_URL, timeoutMs, isSolAuthExpired);
+    } catch (err) {
+      sol = { ok: false, error: errorMessage(err) };
+    }
+
+    return { virtuale, almaesami, rps, sol };
   } finally {
     await browser.close();
   }

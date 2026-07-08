@@ -33,6 +33,7 @@ try {
   summarize("virtuale", result.virtuale);
   summarize("almaesami", result.almaesami);
   summarize("rps", result.rps);
+  summarize("sol", result.sol);
 } catch (err) {
   console.error("Login failed:", err.message);
   process.exit(1);

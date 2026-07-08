@@ -3,17 +3,22 @@ import { randomUUID } from "node:crypto";
 /**
  * Unified in-memory session store shared by every Unibo service.
  *
- * All of Virtuale, AlmaEsami and RPS federate to the same idp.unibo.it ADFS
- * SSO, so a single browser login can produce credentials for all three at
- * once. A {@link SessionRecord} therefore holds per-service credentials keyed
- * by service name, each with its own base URL resolved at the store level.
+ * All of Virtuale, AlmaEsami, RPS and Studenti Online (SOL) federate to the
+ * same idp.unibo.it ADFS SSO, so a single browser login can produce credentials
+ * for all of them at once. A {@link SessionRecord} therefore holds per-service
+ * credentials keyed by service name, each with its own base URL resolved at the
+ * store level.
  *
  * Nothing here touches the network or the filesystem: the store is pure
  * in-memory state plus resolution logic, so it (and the auth-expiry detectors
  * below) can be unit-tested without hitting live services.
  */
 
-export type ServiceName = "virtuale" | "almaesami" | "rps";
+export type ServiceName = "virtuale" | "almaesami" | "rps" | "sol";
+
+/** Services whose auth is a single bootstrap-style host cookie (JSESSIONID /
+ * PHPSESSID). Virtuale is excluded because its AJAX API also needs a sesskey. */
+export type CookieServiceName = "almaesami" | "rps" | "sol";
 
 /**
  * How the credentials in a record were obtained. Only `env` and `browser`
@@ -37,6 +42,7 @@ export type SessionRecord = {
   virtuale?: VirtualeCreds;
   almaesami?: CookieCreds;
   rps?: CookieCreds;
+  sol?: CookieCreds;
 };
 
 /** Server environment defaults the store resolves against. Cookie/sesskey
@@ -49,6 +55,8 @@ export type StoreEnv = {
   almaesamiCookies?: string;
   rpsBaseUrl: string;
   rpsCookies?: string;
+  solBaseUrl: string;
+  solCookies?: string;
 };
 
 /** Fresh credentials produced by a (re-)login, applied across the store. */
@@ -56,6 +64,7 @@ export type ServiceRefresh = {
   virtuale?: { sesskey: string; cookies: string };
   almaesami?: { cookies: string };
   rps?: { cookies: string };
+  sol?: { cookies: string };
 };
 
 export type VirtualeAjaxContext = {
@@ -79,6 +88,8 @@ export const ALMAESAMI_EXPIRED_MESSAGE =
   "AlmaEsami session is missing or expired (SSO login / sessione scaduta). Re-bootstrap with almaesami_bootstrap_session or run unibo_browser_login.";
 export const RPS_EXPIRED_MESSAGE =
   "RPS session is missing or expired (redirected to Unibo SSO). Re-bootstrap with rps_bootstrap_session or run unibo_browser_login.";
+export const SOL_EXPIRED_MESSAGE =
+  "Studenti Online (SOL) session is missing or expired (redirected to Unibo SSO / SOL welcome page). Re-bootstrap with sol_bootstrap_session or run unibo_browser_login.";
 
 /** Thrown when a service response indicates the session is no longer valid.
  * The auto-relogin wrapper keys off this type (and `service`) to decide
@@ -136,6 +147,26 @@ export function isRpsAuthExpired(html: string, finalUrl = ""): boolean {
 }
 
 /**
+ * Studenti Online (SOL): a Java Spring Web Flow app (like AlmaEsami) whose
+ * session cookie is a `JSESSIONID` scoped to `/sol`. A missing/stale session
+ * 302s the authenticated `homeStudentiOnline.htm` either to the SSO form
+ * (`idp.unibo.it/adfs?SAMLRequest=…`) or back to the public `/sol/welcome.htm`
+ * landing (verified: unauthenticated GETs of the home 302 to the IdP; the
+ * public root 302s to welcome.htm). Unlike RPS, the authenticated SOL page's
+ * logout link is a *local* `/sol/logout.htm` (NOT the ADFS `wa=wsignout1.0`
+ * URL, verified against the capture), so a `SAMLRequest` marker in the body is
+ * a safe signal — it is absent when authenticated.
+ */
+export function isSolAuthExpired(html: string, finalUrl = ""): boolean {
+  return (
+    /idp\.unibo\.it\/adfs/i.test(finalUrl) ||
+    /\/sol\/welcome\.htm/i.test(finalUrl) ||
+    /name=["']SAMLRequest["']/i.test(html) ||
+    /SAMLRequest/i.test(html)
+  );
+}
+
+/**
  * Maps a Moodle AJAX logical-error payload to an expired-session signal.
  * `servicerequireslogin` / `invalidsesskey` are the codes Moodle returns once
  * the MoodleSession or sesskey is stale. The whole payload is stringified so
@@ -185,6 +216,7 @@ export class SessionStore {
     virtuale?: VirtualeCreds;
     almaesami?: CookieCreds;
     rps?: CookieCreds;
+    sol?: CookieCreds;
   }): SessionRecord {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -196,7 +228,8 @@ export class SessionStore {
       updatedAtIso: now,
       virtuale: fields.virtuale,
       almaesami: fields.almaesami,
-      rps: fields.rps
+      rps: fields.rps,
+      sol: fields.sol
     };
     this.sessions.set(id, record);
     return record;
@@ -210,6 +243,32 @@ export class SessionStore {
         return this.env.almaesamiBaseUrl;
       case "rps":
         return this.env.rpsBaseUrl;
+      case "sol":
+        return this.env.solBaseUrl;
+    }
+  }
+
+  /** Env cookie holder + var name for a cookie-auth service (used by the
+   * env-session and resolution paths so the per-service mapping lives once). */
+  private envCookiesFor(service: CookieServiceName): string | undefined {
+    switch (service) {
+      case "almaesami":
+        return this.env.almaesamiCookies;
+      case "rps":
+        return this.env.rpsCookies;
+      case "sol":
+        return this.env.solCookies;
+    }
+  }
+
+  private envVarNameFor(service: CookieServiceName): string {
+    switch (service) {
+      case "almaesami":
+        return "ALMAESAMI_COOKIES";
+      case "rps":
+        return "RPS_COOKIES";
+      case "sol":
+        return "SOL_COOKIES";
     }
   }
 
@@ -235,12 +294,11 @@ export class SessionStore {
     return record;
   }
 
-  /** Mint (or reuse) the env-var-backed cookie session for AlmaEsami/RPS. */
-  getOrCreateEnvCookieSession(service: "almaesami" | "rps"): SessionRecord {
-    const cookies = service === "almaesami" ? this.env.almaesamiCookies : this.env.rpsCookies;
-    const envVarName = service === "almaesami" ? "ALMAESAMI_COOKIES" : "RPS_COOKIES";
+  /** Mint (or reuse) the env-var-backed cookie session for AlmaEsami/RPS/SOL. */
+  getOrCreateEnvCookieSession(service: CookieServiceName): SessionRecord {
+    const cookies = this.envCookiesFor(service);
     if (!cookies) {
-      throw new Error(`${envVarName} is not set in the server environment.`);
+      throw new Error(`${this.envVarNameFor(service)} is not set in the server environment.`);
     }
     const existingId = this.envSessionIds.get(service);
     const existing = existingId ? this.sessions.get(existingId) : undefined;
@@ -312,9 +370,9 @@ export class SessionStore {
     );
   }
 
-  /** Resolve a cookie header + base URL for AlmaEsami or RPS. */
+  /** Resolve a cookie header + base URL for AlmaEsami, RPS or SOL. */
   resolveCookieService(
-    service: "almaesami" | "rps",
+    service: CookieServiceName,
     sessionId?: string,
     cookieOverride?: string
   ): CookieContext {
@@ -331,13 +389,12 @@ export class SessionStore {
       this.touch(record);
       return { cookies, baseUrl, refreshable: isRefreshableOrigin(record.origin) };
     }
-    const envCookies = service === "almaesami" ? this.env.almaesamiCookies : this.env.rpsCookies;
-    const envVarName = service === "almaesami" ? "ALMAESAMI_COOKIES" : "RPS_COOKIES";
+    const envCookies = this.envCookiesFor(service);
     if (envCookies) {
       return { cookies: envCookies, baseUrl, refreshable: true };
     }
     throw new Error(
-      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see ${service}_get_env_session / ${service}_bootstrap_session), or set ${envVarName}.`
+      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see ${service}_get_env_session / ${service}_bootstrap_session), or set ${this.envVarNameFor(service)}.`
     );
   }
 
@@ -366,6 +423,9 @@ export class SessionStore {
     if (fresh.rps) {
       this.env.rpsCookies = fresh.rps.cookies;
     }
+    if (fresh.sol) {
+      this.env.solCookies = fresh.sol.cookies;
+    }
 
     const now = new Date().toISOString();
     for (const record of this.sessions.values()) {
@@ -381,6 +441,10 @@ export class SessionStore {
       }
       if (fresh.rps && record.rps) {
         record.rps = { cookies: fresh.rps.cookies };
+        changed = true;
+      }
+      if (fresh.sol && record.sol) {
+        record.sol = { cookies: fresh.sol.cookies };
         changed = true;
       }
       if (changed) record.updatedAtIso = now;

@@ -7,40 +7,51 @@ Guidance for Claude Code when working in this repository.
 `uniboh` is a **TypeScript MCP server** (stdio transport) that exposes University of
 Bologna services to MCP clients. It currently wraps:
 
-- **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API.
+- **virtuale.unibo.it** — the Unibo Moodle instance, via its `service.php` AJAX API, plus
+  course file/resource download and HTML-scraped quiz review.
 - **corsi.unibo.it** — public course timetables, normalized to events + ICS.
-- **almaesami.unibo.it** — student exam plan, history, and messages, read-only HTML scrape.
+- **almaesami.unibo.it** — student exam plan, history, messages, and upcoming appelli, read-only HTML scrape.
 - **rps.unibo.it** — student attendance ("Presenze studenti"): records + register, read-only.
+- **studenti.unibo.it** — Studenti Online (SOL): career summary + service catalogue, read-only HTML scrape.
 
 ## Vision
 
 The goal is for this server to be a **single MCP gateway to _any_ Unibo service**, not just
-Virtuale and timetables. Done so far: Virtuale, timetables/ICS, AlmaEsami (exam plan,
-history, messages), RPS (attendance records + register). Candidate next integrations:
+Virtuale and timetables. Done so far: Virtuale (incl. file download + quiz review),
+timetables/ICS, AlmaEsami (exam plan, history, messages, appelli), RPS (attendance records +
+register), Studenti Online (career + services). Candidate next integrations:
 
-- **Studenti Online** (studenti.unibo.it) — enrolments, fees, career.
+- **Studenti Online** — deepen it: fees detail (amounts/deadlines/status), career/request history.
 - Library (SBA / OPAC), AlmaRM, and other unibo.it subsystems as they come up.
 
 When adding a new service, keep the existing shape: one client/scraper module per service,
 one thin tool-registration block per capability, and the bootstrap-cookie auth model —
 almost everything Unibo is behind the same `idp.unibo.it` ADFS SSO, so a browser-captured
-per-host session cookie (env fallback + per-call override) is the reliable path.
+per-host session cookie (env fallback + per-call override) is the reliable path. New
+authenticated services should plug into the unified `SessionStore` in `src/sessions.ts`
+(add the service to `ServiceName`/`CookieServiceName`) rather than inventing their own store.
 
 ## Layout
 
 ```
 src/
-  server.ts          MCP server: registers every tool, owns the in-memory session store
+  server.ts          MCP server: registers every tool
+  sessions.ts        Unified in-memory SessionStore + shared auth-expiry detectors
   virtualeClient.ts  Moodle AJAX client (service.php + service-nologin.php)
   login.ts           Best-effort HTML form-login scraper (sesskey + cookies)
+  browserAuth.ts     Headless-Chromium ADFS SSO login capturing cookies for every service
   calendar.ts        corsi.unibo.it timetable → normalized events → ICS (pure + fetch)
-  almaesami.ts       AlmaEsami scrapers (exam plan / history / messages)
+  virtualeFiles.ts   Virtuale course file/resource download (+ PDF text extraction)
+  quiz.ts            Virtuale quiz review (HTML scrape)
+  almaesami.ts       AlmaEsami scrapers (exam plan / history / messages / appelli)
   rps.ts             RPS attendance scrapers (attendance records + register)
+  sol.ts             Studenti Online scrapers (career summary / service catalogue)
   *.test.ts          node:test unit tests, excluded from the build
 ```
 
 `dist/` is build output (gitignored). Reference notes for the reverse-engineered APIs live in
-`virtuale.unibo.it-api-notes.md` and `unibo-timetable-calendar-api.md`.
+`virtuale.unibo.it-api-notes.md`, `unibo-timetable-calendar-api.md`, `almaesami-rps-api-notes.md`,
+and `sol-api-notes.md`.
 
 ## Conventions
 

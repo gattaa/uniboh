@@ -16,6 +16,7 @@ import { getExamPlan, getExamHistory, getMessages, getAppelli } from "./almaesam
 import { getAttendanceRecords, getRegister } from "./rps.js";
 import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
 import { buildFileListing, getResource } from "./virtualeFiles.js";
+import { getCareer as getSolCareer, getServices as getSolServices } from "./sol.js";
 import {
   SessionExpiredError,
   SessionStore,
@@ -39,8 +40,12 @@ const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
 const rpsBaseUrl = process.env.RPS_BASE_URL ?? "https://rps.unibo.it";
 const rpsCookies = process.env.RPS_COOKIES;
 
+const solBaseUrl = process.env.SOL_BASE_URL ?? "https://studenti.unibo.it";
+const solCookies = process.env.SOL_COOKIES;
+
 // Single unified in-memory session store: one record can carry credentials for
-// Virtuale, AlmaEsami and RPS at once (they share the idp.unibo.it SSO).
+// Virtuale, AlmaEsami, RPS and Studenti Online at once (they share the
+// idp.unibo.it SSO).
 const store = new SessionStore({
   virtualeBaseUrl: baseUrl,
   virtualeSesskey: sesskey,
@@ -48,7 +53,9 @@ const store = new SessionStore({
   almaesamiBaseUrl,
   almaesamiCookies,
   rpsBaseUrl,
-  rpsCookies
+  rpsCookies,
+  solBaseUrl,
+  solCookies
 });
 
 const publicClient = new VirtualeClient({ baseUrl });
@@ -57,6 +64,7 @@ const publicClient = new VirtualeClient({ baseUrl });
 // handshake off the shared idp.unibo.it session.
 const browserAlmaesamiUrl = new URL("/almaesami/studenti/home.htm", almaesamiBaseUrl).toString();
 const browserRpsUrl = new URL("/", rpsBaseUrl).toString();
+const browserSolUrl = new URL("/sol/studenti/homeStudentiOnline.htm", solBaseUrl).toString();
 
 function textResult(out: Record<string, unknown>) {
   return {
@@ -79,12 +87,14 @@ async function performRelogin(): Promise<void> {
     email: ssoEmail!,
     password: ssoPassword!,
     almaesamiUrl: browserAlmaesamiUrl,
-    rpsUrl: browserRpsUrl
+    rpsUrl: browserRpsUrl,
+    solUrl: browserSolUrl
   });
   const refresh: ServiceRefresh = {};
   if (result.virtuale.ok) refresh.virtuale = { sesskey: result.virtuale.sesskey, cookies: result.virtuale.cookies };
   if (result.almaesami.ok) refresh.almaesami = { cookies: result.almaesami.cookies };
   if (result.rps.ok) refresh.rps = { cookies: result.rps.cookies };
+  if (result.sol.ok) refresh.sol = { cookies: result.sol.cookies };
   store.applyRefresh(refresh);
 }
 
@@ -164,7 +174,7 @@ async function runVirtualeQuiz<T>(
 }
 
 async function runCookieService<T>(
-  service: "almaesami" | "rps",
+  service: "almaesami" | "rps" | "sol",
   sessionId: string | undefined,
   cookieOverride: string | undefined,
   baseUrlOverride: string | undefined,
@@ -281,11 +291,17 @@ server.registerTool(
 
 let browserSessionId: string | undefined;
 
-function capturedServices(record: SessionRecord): { virtuale: boolean; almaesami: boolean; rps: boolean } {
+function capturedServices(record: SessionRecord): {
+  virtuale: boolean;
+  almaesami: boolean;
+  rps: boolean;
+  sol: boolean;
+} {
   return {
     virtuale: Boolean(record.virtuale),
     almaesami: Boolean(record.almaesami),
-    rps: Boolean(record.rps)
+    rps: Boolean(record.rps),
+    sol: Boolean(record.sol)
   };
 }
 
@@ -310,7 +326,8 @@ async function handleBrowserLogin({ force_relogin }: { force_relogin: boolean })
     email: ssoEmail,
     password: ssoPassword,
     almaesamiUrl: browserAlmaesamiUrl,
-    rpsUrl: browserRpsUrl
+    rpsUrl: browserRpsUrl,
+    solUrl: browserSolUrl
   });
 
   const virtuale = result.virtuale.ok
@@ -318,22 +335,24 @@ async function handleBrowserLogin({ force_relogin }: { force_relogin: boolean })
     : undefined;
   const almaesami = result.almaesami.ok ? { cookies: result.almaesami.cookies } : undefined;
   const rps = result.rps.ok ? { cookies: result.rps.cookies } : undefined;
+  const sol = result.sol.ok ? { cookies: result.sol.cookies } : undefined;
 
   const errors: Record<string, string> = {};
   if (!result.virtuale.ok) errors.virtuale = result.virtuale.error;
   if (!result.almaesami.ok) errors.almaesami = result.almaesami.error;
   if (!result.rps.ok) errors.rps = result.rps.error;
+  if (!result.sol.ok) errors.sol = result.sol.error;
 
-  if (!virtuale && !almaesami && !rps) {
+  if (!virtuale && !almaesami && !rps && !sol) {
     throw new Error(
-      `Browser login captured no services. virtuale: ${errors.virtuale}; almaesami: ${errors.almaesami}; rps: ${errors.rps}`
+      `Browser login captured no services. virtuale: ${errors.virtuale}; almaesami: ${errors.almaesami}; rps: ${errors.rps}; sol: ${errors.sol}`
     );
   }
 
   // Drop any previous browser session so orphaned records don't accumulate.
   if (browserSessionId) store.delete(browserSessionId);
 
-  const record = store.mint({ label: ssoEmail, origin: "browser", virtuale, almaesami, rps });
+  const record = store.mint({ label: ssoEmail, origin: "browser", virtuale, almaesami, rps, sol });
   browserSessionId = record.id;
 
   return textResult({
@@ -404,7 +423,8 @@ server.registerTool(
       out.cookies = {
         virtuale: record.virtuale?.cookies,
         almaesami: record.almaesami?.cookies,
-        rps: record.rps?.cookies
+        rps: record.rps?.cookies,
+        sol: record.sol?.cookies
       };
     }
 
@@ -769,7 +789,7 @@ server.registerTool(
 function registerEnvCookieSessionTool(opts: {
   toolName: string;
   title: string;
-  service: "almaesami" | "rps";
+  service: "almaesami" | "rps" | "sol";
   envVarName: string;
 }) {
   server.registerTool(
@@ -795,7 +815,7 @@ function registerEnvCookieSessionTool(opts: {
 function registerCookieBootstrapTool(opts: {
   toolName: string;
   title: string;
-  service: "almaesami" | "rps";
+  service: "almaesami" | "rps" | "sol";
   cookieDescription: string;
   defaultLabel: string;
 }) {
@@ -996,6 +1016,72 @@ server.registerTool(
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
     const data = await runCookieService("rps", session_id, inputCookies, base_url, (ctx) => getRegister(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
+  }
+);
+
+// --- Studenti Online (SOL) --------------------------------------------------
+
+const solCookiesSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    "Cookie header with an authenticated JSESSIONID from a logged-in Studenti Online browser session. Falls back to session_id, then SOL_COOKIES."
+  );
+const solSessionIdSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe("session_id from sol_get_env_session, sol_bootstrap_session, or unibo_browser_login.");
+
+registerCookieBootstrapTool({
+  toolName: "sol_bootstrap_session",
+  title: "Bootstrap Studenti Online Session",
+  service: "sol",
+  cookieDescription: "JSESSIONID cookie header for studenti.unibo.it",
+  defaultLabel: "sol-bootstrap"
+});
+
+registerEnvCookieSessionTool({
+  toolName: "sol_get_env_session",
+  title: "Get Studenti Online Env-Backed Session",
+  service: "sol",
+  envVarName: "SOL_COOKIES"
+});
+
+server.registerTool(
+  "sol_get_career",
+  {
+    title: "Get Studenti Online Career Summary",
+    description:
+      "Reads the authenticated student's Studenti Online (studenti.unibo.it) home page into a career summary: greeting/identity, enrolled course of study, and in-progress requests. Read-only; never submits requests or payments. NOTE: parsed from a single logged-in capture — selectors are best-effort and individual fields degrade to empty rather than failing.",
+    inputSchema: {
+      session_id: solSessionIdSchema,
+      cookies: solCookiesSchema,
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await runCookieService("sol", session_id, inputCookies, base_url, (ctx) => getSolCareer(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
+  }
+);
+
+server.registerTool(
+  "sol_get_services",
+  {
+    title: "List Studenti Online Services",
+    description:
+      "Lists the Studenti Online service tiles available to the student (name, link, description) — e.g. fees/payments, enrolments, certificates — so a caller can discover what the portal exposes. Read-only; it lists links, it does not act on them.",
+    inputSchema: {
+      session_id: solSessionIdSchema,
+      cookies: solCookiesSchema,
+      base_url: z.string().url().optional()
+    }
+  },
+  async ({ session_id, cookies: inputCookies, base_url }) => {
+    const data = await runCookieService("sol", session_id, inputCookies, base_url, (ctx) => getSolServices(ctx));
     return textResult(data as unknown as Record<string, unknown>);
   }
 );
