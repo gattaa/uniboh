@@ -1,5 +1,7 @@
 import { load } from "cheerio";
 
+import { RPS_EXPIRED_MESSAGE, SessionExpiredError, isRpsAuthExpired } from "./sessions.js";
+
 /**
  * RPS — "Registro Presenze Studenti" (rps.unibo.it), the Unibo student
  * attendance system. A CakePHP app behind ADFS SAML SSO; authentication is a
@@ -38,18 +40,6 @@ const DEFAULT_BASE_URL = "https://rps.unibo.it";
 const SURVEYS_PATH = "/students/surveys?lang=it";
 const REGISTER_PATH = "/students/register?lang=it";
 
-function isUnauthenticated(html: string, url: string): boolean {
-  // NB: an authenticated page still links to the ADFS *sign-out* URL
-  // (wa=wsignout1.0), so a bare "idp.unibo.it/adfs" substring in the HTML is not
-  // a reliable signal. Only treat it as unauthenticated when the request itself
-  // ended at the IdP, or the page is the SAML sign-in form.
-  return (
-    /idp\.unibo\.it\/adfs/i.test(url) ||
-    /name="SAMLRequest"/i.test(html) ||
-    /<title>\s*Sign In\s*<\/title>/i.test(html)
-  );
-}
-
 /** Split "84285 SIGNALING PATHWAYS ..." into leading code + remaining name. */
 function splitSubject(cell: string): { code: string; name: string } {
   const s = cell.trim();
@@ -65,10 +55,8 @@ function splitSubject(cell: string): { code: string; name: string } {
  * after asserting the page is an authenticated RPS view.
  */
 function readTableRows(html: string, url: string): string[][] {
-  if (isUnauthenticated(html, url)) {
-    throw new Error(
-      "RPS session is missing or expired (redirected to Unibo SSO). Re-capture the PHPSESSID cookie after logging into rps.unibo.it."
-    );
+  if (isRpsAuthExpired(html, url)) {
+    throw new SessionExpiredError("rps", RPS_EXPIRED_MESSAGE);
   }
 
   const $ = load(html);

@@ -15,12 +15,24 @@ if (!email || !password) {
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 
+function summarize(name, res) {
+  if (res.ok) {
+    const cookieNames = res.cookies
+      .split("; ")
+      .map((c) => c.split("=")[0])
+      .join(", ");
+    console.log(`  ${name}: OK (final ${res.finalUrl}) cookies: ${cookieNames}${res.sesskey ? ` sesskey: ${res.sesskey}` : ""}`);
+  } else {
+    console.log(`  ${name}: FAILED — ${res.error}`);
+  }
+}
+
 try {
   const result = await loginWithBrowser({ baseUrl, email, password });
-  console.log("Login succeeded.");
-  console.log("sesskey:", result.sesskey);
-  console.log("final URL:", result.finalUrl);
-  console.log("cookie names:", result.cookies.split("; ").map((c) => c.split("=")[0]).join(", "));
+  console.log("Browser login finished. Per-service result:");
+  summarize("virtuale", result.virtuale);
+  summarize("almaesami", result.almaesami);
+  summarize("rps", result.rps);
 } catch (err) {
   console.error("Login failed:", err.message);
   process.exit(1);

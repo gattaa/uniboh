@@ -1,37 +1,51 @@
-import { chromium, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page } from "playwright";
 
 import { extractSesskey } from "./login.js";
+import { isAlmaesamiAuthExpired, isRpsAuthExpired } from "./sessions.js";
 
 /**
- * Headless Chromium login for virtuale.unibo.it. `/login/index.php` always
- * redirects to the ADFS SSO stack at idp.unibo.it (see
- * almaesami-rps-api-notes.md), which is a *multi-step* flow: a Home Realm
- * Discovery page (enter email → Next) followed by a username/password page.
- * A plain HTTP form POST can't drive that, so this walks a real browser
- * through it with a generic step loop that fills whatever email / username /
- * password field is present on the current page and submits, repeating until
- * it lands back off the IdP.
+ * Headless Chromium login across the Unibo SSO estate. `/login/index.php` on
+ * virtuale.unibo.it always redirects to the ADFS SSO stack at idp.unibo.it
+ * (see almaesami-rps-api-notes.md), a *multi-step* flow: a Home Realm Discovery
+ * page (pick UNIBO) followed by a username/password page. A plain HTTP form
+ * POST can't drive that, so this walks a real browser through it.
  *
- * Only viable for accounts without interactive MFA; if the flow stalls on an
- * IdP page it can't advance (MFA / verification), this throws rather than
- * hanging.
+ * Because AlmaEsami and RPS federate to the *same* idp.unibo.it session, once
+ * the Virtuale ADFS handshake completes the browser context already holds an
+ * authenticated IdP session; navigating to each service then completes its own
+ * SAML handshake without re-prompting. We capture each host's cookies
+ * (JSESSIONID scoped to /almaesami; PHPSESSID for rps).
+ *
+ * Each service is best-effort: if one handshake fails or stalls we still return
+ * the others, reporting per-service success. Only viable for accounts without
+ * interactive MFA; if the ADFS flow stalls on a page it can't advance, the
+ * Virtuale step throws (and the others will report failure, since the shared
+ * IdP session was never established).
  */
 
 export type BrowserLoginInput = {
   baseUrl: string;
   email: string;
   password: string;
+  almaesamiUrl?: string;
+  rpsUrl?: string;
   timeoutMs?: number;
 };
 
+export type VirtualeCaptured = { ok: true; sesskey: string; cookies: string; finalUrl: string };
+export type CookieCaptured = { ok: true; cookies: string; finalUrl: string };
+export type ServiceFailure = { ok: false; error: string };
+
 export type BrowserLoginResult = {
-  sesskey: string;
-  cookies: string;
-  finalUrl: string;
+  virtuale: VirtualeCaptured | ServiceFailure;
+  almaesami: CookieCaptured | ServiceFailure;
+  rps: CookieCaptured | ServiceFailure;
 };
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_STEPS = 8;
+const DEFAULT_ALMAESAMI_URL = "https://almaesami.unibo.it/almaesami/studenti/home.htm";
+const DEFAULT_RPS_URL = "https://rps.unibo.it/";
 
 // Home Realm Discovery: pick the UNIBO (local AD) identity provider. The page
 // renders clickable `<div class="idp btnUnibo">` tiles that call
@@ -132,6 +146,130 @@ async function dismissOverlays(page: Page): Promise<void> {
 
 const onIdp = (url: string): boolean => /idp\.unibo\.it|login\.microsoftonline\.com|login\.live\.com/i.test(url);
 
+async function cookieHeaderFor(context: BrowserContext, url: string): Promise<string> {
+  const cookies = await context.cookies(url);
+  return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+}
+
+/** Drive the ADFS SSO flow on the Virtuale login page, then capture the
+ * sesskey + cookies. Establishes the shared idp.unibo.it session the other
+ * services piggyback on. */
+async function completeVirtualeLogin(
+  page: Page,
+  context: BrowserContext,
+  input: BrowserLoginInput,
+  timeoutMs: number,
+  deadline: number
+): Promise<VirtualeCaptured> {
+  await page.goto(new URL("/login/index.php", input.baseUrl).toString(), {
+    waitUntil: "domcontentloaded",
+    timeout: timeoutMs
+  });
+
+  let filledPassword = false;
+
+  for (let step = 0; step < MAX_STEPS && Date.now() < deadline; step++) {
+    if (!onIdp(page.url())) break;
+
+    await dismissOverlays(page);
+
+    // Home Realm Discovery: if the UNIBO IdP tile is present and we're not yet
+    // on a password page, select it and advance.
+    const hasPassword = (await page.locator(PASSWORD_SELECTORS.join(", ")).count()) > 0;
+    if (!hasPassword) {
+      const selectedRealm = await selectUniboRealm(page);
+      if (selectedRealm) {
+        try {
+          await page.waitForLoadState("networkidle", { timeout: 10_000 });
+        } catch {
+          // in-place update — keep looping
+        }
+        continue;
+      }
+    }
+
+    const filledEmail = await fillFirstVisible(page, EMAIL_SELECTORS, input.email);
+    const filledUsername = await fillFirstVisible(page, USERNAME_SELECTORS, input.email);
+    const filledPw = await fillFirstVisible(page, PASSWORD_SELECTORS, input.password);
+    filledPassword = filledPassword || filledPw;
+
+    if (!filledEmail && !filledUsername && !filledPw) {
+      // Nothing on this IdP page we know how to fill — likely MFA / an
+      // unexpected step. Give up rather than spin.
+      throw new Error(
+        `Stuck on an ADFS page this headless flow can't advance (${page.url()}). This usually means MFA/verification is required — use virtuale_bootstrap_session instead.`
+      );
+    }
+
+    const submitted = await clickPrimarySubmit(page);
+    if (!submitted) {
+      // Fall back to pressing Enter in the last field we touched.
+      await page.keyboard.press("Enter");
+    }
+
+    try {
+      await page.waitForLoadState("networkidle", { timeout: 10_000 });
+    } catch {
+      // some steps update in place without a full navigation — keep looping
+    }
+  }
+
+  if (onIdp(page.url())) {
+    throw new Error(
+      `Login did not complete — still on ${page.url()}. ${
+        filledPassword ? "Credentials may be wrong, or MFA is required." : "Could not reach the password step."
+      } Use virtuale_bootstrap_session if MFA is enabled.`
+    );
+  }
+
+  await page.goto(new URL("/my/", input.baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: timeoutMs });
+  const html = await page.content();
+  const sesskey = extractSesskey(html);
+  if (!sesskey) {
+    throw new Error(`Logged in but could not find a sesskey on ${page.url()}.`);
+  }
+
+  const cookies = await cookieHeaderFor(context, input.baseUrl);
+  if (!cookies) {
+    throw new Error("Logged in but no cookies were captured for the Virtuale host.");
+  }
+
+  return { ok: true, sesskey, cookies, finalUrl: page.url() };
+}
+
+/** Navigate to a service that shares the idp.unibo.it session and capture its
+ * host cookie once the SAML handshake completes. */
+async function captureCookieService(
+  page: Page,
+  context: BrowserContext,
+  targetUrl: string,
+  timeoutMs: number,
+  isExpired: (html: string, url: string) => boolean
+): Promise<CookieCaptured> {
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+  try {
+    await page.waitForLoadState("networkidle", { timeout: 10_000 });
+  } catch {
+    // best effort — the page may keep a long-poll connection open
+  }
+
+  const finalUrl = page.url();
+  const html = await page.content();
+  if (onIdp(finalUrl) || isExpired(html, finalUrl)) {
+    throw new Error(`SAML handshake did not complete — landed on ${finalUrl}.`);
+  }
+
+  // Query cookies against the *target* URL so path-scoped cookies (e.g.
+  // JSESSIONID with Path=/almaesami) are included.
+  const cookies = await cookieHeaderFor(context, finalUrl.startsWith("http") ? finalUrl : targetUrl);
+  if (!cookies) {
+    throw new Error(`Authenticated but no cookies were captured for ${targetUrl}.`);
+  }
+  return { ok: true, cookies, finalUrl };
+}
+
+const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 export async function loginWithBrowser(input: BrowserLoginInput): Promise<BrowserLoginResult> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
@@ -141,81 +279,34 @@ export async function loginWithBrowser(input: BrowserLoginInput): Promise<Browse
     const context = await browser.newContext();
     const page = await context.newPage();
 
-    await page.goto(new URL("/login/index.php", input.baseUrl).toString(), {
-      waitUntil: "domcontentloaded",
-      timeout: timeoutMs
-    });
-
-    let filledPassword = false;
-
-    for (let step = 0; step < MAX_STEPS && Date.now() < deadline; step++) {
-      if (!onIdp(page.url())) break;
-
-      await dismissOverlays(page);
-
-      // Home Realm Discovery: if the UNIBO IdP tile is present and we're not yet
-      // on a password page, select it and advance.
-      const hasPassword = (await page.locator(PASSWORD_SELECTORS.join(", ")).count()) > 0;
-      if (!hasPassword) {
-        const selectedRealm = await selectUniboRealm(page);
-        if (selectedRealm) {
-          try {
-            await page.waitForLoadState("networkidle", { timeout: 10_000 });
-          } catch {
-            // in-place update — keep looping
-          }
-          continue;
-        }
-      }
-
-      const filledEmail = await fillFirstVisible(page, EMAIL_SELECTORS, input.email);
-      const filledUsername = await fillFirstVisible(page, USERNAME_SELECTORS, input.email);
-      const filledPw = await fillFirstVisible(page, PASSWORD_SELECTORS, input.password);
-      filledPassword = filledPassword || filledPw;
-
-      if (!filledEmail && !filledUsername && !filledPw) {
-        // Nothing on this IdP page we know how to fill — likely MFA / an
-        // unexpected step. Give up rather than spin.
-        throw new Error(
-          `Stuck on an ADFS page this headless flow can't advance (${page.url()}). This usually means MFA/verification is required — use virtuale_bootstrap_session instead.`
-        );
-      }
-
-      const submitted = await clickPrimarySubmit(page);
-      if (!submitted) {
-        // Fall back to pressing Enter in the last field we touched.
-        await page.keyboard.press("Enter");
-      }
-
-      try {
-        await page.waitForLoadState("networkidle", { timeout: 10_000 });
-      } catch {
-        // some steps update in place without a full navigation — keep looping
-      }
+    let virtuale: VirtualeCaptured | ServiceFailure;
+    try {
+      virtuale = await completeVirtualeLogin(page, context, input, timeoutMs, deadline);
+    } catch (err) {
+      virtuale = { ok: false, error: errorMessage(err) };
     }
 
-    if (onIdp(page.url())) {
-      throw new Error(
-        `Login did not complete — still on ${page.url()}. ${
-          filledPassword ? "Credentials may be wrong, or MFA is required." : "Could not reach the password step."
-        } Use virtuale_bootstrap_session if MFA is enabled.`
+    let almaesami: CookieCaptured | ServiceFailure;
+    try {
+      almaesami = await captureCookieService(
+        page,
+        context,
+        input.almaesamiUrl ?? DEFAULT_ALMAESAMI_URL,
+        timeoutMs,
+        isAlmaesamiAuthExpired
       );
+    } catch (err) {
+      almaesami = { ok: false, error: errorMessage(err) };
     }
 
-    await page.goto(new URL("/my/", input.baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    const html = await page.content();
-    const sesskey = extractSesskey(html);
-    if (!sesskey) {
-      throw new Error(`Logged in but could not find a sesskey on ${page.url()}.`);
+    let rps: CookieCaptured | ServiceFailure;
+    try {
+      rps = await captureCookieService(page, context, input.rpsUrl ?? DEFAULT_RPS_URL, timeoutMs, isRpsAuthExpired);
+    } catch (err) {
+      rps = { ok: false, error: errorMessage(err) };
     }
 
-    const cookies = await context.cookies(input.baseUrl);
-    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-    if (!cookieHeader) {
-      throw new Error("Logged in but no cookies were captured for the Virtuale host.");
-    }
-
-    return { sesskey, cookies: cookieHeader, finalUrl: page.url() };
+    return { virtuale, almaesami, rps };
   } finally {
     await browser.close();
   }

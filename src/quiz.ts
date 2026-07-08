@@ -1,5 +1,7 @@
 import { load } from "cheerio";
 
+import { SessionExpiredError, VIRTUALE_EXPIRED_MESSAGE, isVirtualeAuthExpired } from "./sessions.js";
+
 /**
  * virtuale.unibo.it (Moodle) quiz review scrapers.
  *
@@ -55,10 +57,6 @@ export type QuizAttemptReview = {
   questions: QuizQuestionReview[];
 };
 
-function isUnauthenticated(html: string): boolean {
-  return /SAMLRequest|idp\.unibo\.it\/adfs|login\/index\.php/i.test(html);
-}
-
 async function fetchPage(path: string, input: { cookies: string; baseUrl?: string }): Promise<{ url: string; html: string }> {
   const baseUrl = input.baseUrl ?? DEFAULT_BASE_URL;
   const endpoint = new URL(path, baseUrl).toString();
@@ -73,11 +71,14 @@ async function fetchPage(path: string, input: { cookies: string; baseUrl?: strin
   }
 
   const html = await res.text();
-  if (isUnauthenticated(html)) {
-    throw new Error("Virtuale session is missing or expired. Re-capture the MoodleSession cookie from a logged-in browser.");
+  const finalUrl = res.url || endpoint;
+  // An expired MoodleSession is redirected to the SSO login page, which would
+  // otherwise parse into empty/garbage results; detect it and fail loudly.
+  if (isVirtualeAuthExpired(html, finalUrl)) {
+    throw new SessionExpiredError("virtuale", VIRTUALE_EXPIRED_MESSAGE);
   }
 
-  return { url: res.url || endpoint, html };
+  return { url: finalUrl, html };
 }
 
 /** Parse the quiz activities linked from a course page. Pure/testable. */

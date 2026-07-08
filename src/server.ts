@@ -1,9 +1,8 @@
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { VirtualeClient } from "./virtualeClient.js";
+import { VirtualeClient, type ServiceCallResult } from "./virtualeClient.js";
 import { loginWithPassword } from "./login.js";
 import { loginWithBrowser } from "./browserAuth.js";
 import {
@@ -16,6 +15,14 @@ import {
 import { getExamPlan, getExamHistory, getMessages } from "./almaesami.js";
 import { getAttendanceRecords, getRegister } from "./rps.js";
 import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
+import {
+  SessionExpiredError,
+  SessionStore,
+  VIRTUALE_EXPIRED_MESSAGE,
+  isMoodleAuthError,
+  type ServiceRefresh,
+  type SessionRecord
+} from "./sessions.js";
 
 const baseUrl = process.env.VIRTUALE_BASE_URL ?? "https://virtuale.unibo.it";
 const sesskey = process.env.VIRTUALE_SESSKEY;
@@ -31,45 +38,143 @@ const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
 const rpsBaseUrl = process.env.RPS_BASE_URL ?? "https://rps.unibo.it";
 const rpsCookies = process.env.RPS_COOKIES;
 
-type SessionRecord = {
-  id: string;
-  email: string;
-  sesskey: string;
-  cookies: string;
-  createdAtIso: string;
-  updatedAtIso: string;
-  client: VirtualeClient;
-};
-
-const sessions = new Map<string, SessionRecord>();
-
-const envClient = sesskey && cookies
-  ? new VirtualeClient({
-      baseUrl,
-      sesskey,
-      cookies
-    })
-  : null;
+// Single unified in-memory session store: one record can carry credentials for
+// Virtuale, AlmaEsami and RPS at once (they share the idp.unibo.it SSO).
+const store = new SessionStore({
+  virtualeBaseUrl: baseUrl,
+  virtualeSesskey: sesskey,
+  virtualeCookies: cookies,
+  almaesamiBaseUrl,
+  almaesamiCookies,
+  rpsBaseUrl,
+  rpsCookies
+});
 
 const publicClient = new VirtualeClient({ baseUrl });
 
-function getClientForSession(sessionId?: string): VirtualeClient {
-  if (sessionId) {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      throw new Error("Unknown session_id. Use virtuale_login_with_password first.");
+// URLs the headless browser login visits to complete each service's SAML
+// handshake off the shared idp.unibo.it session.
+const browserAlmaesamiUrl = new URL("/almaesami/studenti/home.htm", almaesamiBaseUrl).toString();
+const browserRpsUrl = new URL("/", rpsBaseUrl).toString();
+
+function textResult(out: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }],
+    structuredContent: out
+  };
+}
+
+// --- Auto re-login ----------------------------------------------------------
+
+const canRelogin = (): boolean => Boolean(ssoEmail && ssoPassword);
+
+// A single in-flight re-login promise shared by concurrent callers, so an
+// expiry storm triggers at most one headless browser login at a time.
+let reloginPromise: Promise<void> | null = null;
+
+async function performRelogin(): Promise<void> {
+  const result = await loginWithBrowser({
+    baseUrl,
+    email: ssoEmail!,
+    password: ssoPassword!,
+    almaesamiUrl: browserAlmaesamiUrl,
+    rpsUrl: browserRpsUrl
+  });
+  const refresh: ServiceRefresh = {};
+  if (result.virtuale.ok) refresh.virtuale = { sesskey: result.virtuale.sesskey, cookies: result.virtuale.cookies };
+  if (result.almaesami.ok) refresh.almaesami = { cookies: result.almaesami.cookies };
+  if (result.rps.ok) refresh.rps = { cookies: result.rps.cookies };
+  store.applyRefresh(refresh);
+}
+
+async function reloginOnce(): Promise<void> {
+  if (!reloginPromise) {
+    reloginPromise = performRelogin().finally(() => {
+      reloginPromise = null;
+    });
+  }
+  return reloginPromise;
+}
+
+/**
+ * Run `work` against freshly resolved credentials. If it fails with a
+ * {@link SessionExpiredError} and the credentials are refreshable (env- or
+ * browser-login-backed) and EMAIL+PASSWORD are configured, transparently
+ * re-run the browser login once, update the stored session, and retry once.
+ * User-pasted (bootstrap/password) sessions and inline cookie overrides are
+ * never auto-refreshed — their cookies aren't ours to renew.
+ */
+async function withAutoRelogin<Ctx, T>(
+  resolve: () => { context: Ctx; refreshable: boolean },
+  work: (ctx: Ctx) => Promise<T>
+): Promise<T> {
+  const first = resolve();
+  try {
+    return await work(first.context);
+  } catch (err) {
+    if (!(err instanceof SessionExpiredError) || !first.refreshable || !canRelogin()) {
+      throw err;
     }
-
-    session.updatedAtIso = new Date().toISOString();
-    return session.client;
+    await reloginOnce();
+    // Re-resolve so we pick up the refreshed credentials from the store.
+    const second = resolve();
+    return work(second.context);
   }
+}
 
-  if (envClient) {
-    return envClient;
-  }
+async function callVirtualeService(
+  sessionId: string | undefined,
+  label: string,
+  methodname: string,
+  args: Record<string, unknown>
+): Promise<ServiceCallResult> {
+  return withAutoRelogin(
+    () => {
+      const ctx = store.resolveVirtualeAjax(sessionId);
+      return { context: ctx, refreshable: ctx.refreshable };
+    },
+    async (ctx) => {
+      const client = new VirtualeClient({ baseUrl: ctx.baseUrl, sesskey: ctx.sesskey, cookies: ctx.cookies });
+      const result = await client.callService(methodname, args);
+      if (result.error) {
+        if (isMoodleAuthError(result)) {
+          throw new SessionExpiredError("virtuale", VIRTUALE_EXPIRED_MESSAGE);
+        }
+        throw new Error(`${label} failed: ${result.message ?? "unknown error"}`);
+      }
+      return result;
+    }
+  );
+}
 
-  throw new Error(
-    "No authenticated context available. Either set VIRTUALE_SESSKEY + VIRTUALE_COOKIES env vars, or call virtuale_login_with_password and pass session_id."
+async function runVirtualeQuiz<T>(
+  sessionId: string | undefined,
+  cookieOverride: string | undefined,
+  baseUrlOverride: string | undefined,
+  work: (ctx: { cookies: string; baseUrl: string }) => Promise<T>
+): Promise<T> {
+  return withAutoRelogin(
+    () => {
+      const ctx = store.resolveVirtualeCookies(sessionId, cookieOverride);
+      return { context: { cookies: ctx.cookies, baseUrl: baseUrlOverride ?? ctx.baseUrl }, refreshable: ctx.refreshable };
+    },
+    work
+  );
+}
+
+async function runCookieService<T>(
+  service: "almaesami" | "rps",
+  sessionId: string | undefined,
+  cookieOverride: string | undefined,
+  baseUrlOverride: string | undefined,
+  work: (ctx: { cookies: string; baseUrl: string }) => Promise<T>
+): Promise<T> {
+  return withAutoRelogin(
+    () => {
+      const ctx = store.resolveCookieService(service, sessionId, cookieOverride);
+      return { context: { cookies: ctx.cookies, baseUrl: baseUrlOverride ?? ctx.baseUrl }, refreshable: ctx.refreshable };
+    },
+    work
   );
 }
 
@@ -77,6 +182,8 @@ const server = new McpServer({
   name: "unibo-virtuale-mcp",
   version: "0.1.0"
 });
+
+// --- Session management ------------------------------------------------------
 
 server.registerTool(
   "virtuale_login_with_password",
@@ -98,30 +205,18 @@ server.registerTool(
       loginPath: login_path
     });
 
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    const record: SessionRecord = {
-      id,
-      email,
-      sesskey: login.sesskey,
-      cookies: login.cookies,
-      createdAtIso: now,
-      updatedAtIso: now,
-      client: new VirtualeClient({
-        baseUrl,
-        sesskey: login.sesskey,
-        cookies: login.cookies
-      })
-    };
-
-    sessions.set(id, record);
+    const record = store.mint({
+      label: email,
+      origin: "password",
+      virtuale: { sesskey: login.sesskey, cookies: login.cookies }
+    });
 
     const out: Record<string, unknown> = {
-      session_id: id,
+      session_id: record.id,
       base_url: baseUrl,
       login_url: login.loginUrl,
       final_url: login.finalUrl,
-      created_at: now
+      created_at: record.createdAtIso
     };
 
     if (include_cookie_header) {
@@ -129,10 +224,7 @@ server.registerTool(
       out.cookies = login.cookies;
     }
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
+    return textResult(out);
   }
 );
 
@@ -149,30 +241,18 @@ server.registerTool(
     }
   },
   async ({ sesskey: inputSesskey, cookies: inputCookies, email_label, include_cookie_header }) => {
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    const record: SessionRecord = {
-      id,
-      email: email_label,
-      sesskey: inputSesskey,
-      cookies: inputCookies,
-      createdAtIso: now,
-      updatedAtIso: now,
-      client: new VirtualeClient({
-        baseUrl,
-        sesskey: inputSesskey,
-        cookies: inputCookies
-      })
-    };
-
-    sessions.set(id, record);
+    const record = store.mint({
+      label: email_label,
+      origin: "bootstrap",
+      virtuale: { sesskey: inputSesskey, cookies: inputCookies }
+    });
 
     const out: Record<string, unknown> = {
-      session_id: id,
+      session_id: record.id,
       sesskey: inputSesskey,
       base_url: baseUrl,
       source: "bootstrap",
-      created_at: now,
+      created_at: record.createdAtIso,
       label: email_label
     };
 
@@ -180,14 +260,9 @@ server.registerTool(
       out.cookies = inputCookies;
     }
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
+    return textResult(out);
   }
 );
-
-let virtualeEnvSessionId: string | undefined;
 
 server.registerTool(
   "virtuale_get_env_session",
@@ -198,89 +273,104 @@ server.registerTool(
     inputSchema: {}
   },
   async () => {
-    if (!envClient || !sesskey || !cookies) {
-      throw new Error("VIRTUALE_SESSKEY and VIRTUALE_COOKIES are not both set in the server environment.");
-    }
-
-    const existing = virtualeEnvSessionId ? sessions.get(virtualeEnvSessionId) : undefined;
-    if (existing) {
-      existing.updatedAtIso = new Date().toISOString();
-      const out = { session_id: existing.id, base_url: baseUrl, created_at: existing.createdAtIso };
-      return {
-        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-        structuredContent: out
-      };
-    }
-
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    sessions.set(id, {
-      id,
-      email: "env-session",
-      sesskey,
-      cookies,
-      createdAtIso: now,
-      updatedAtIso: now,
-      client: envClient
-    });
-    virtualeEnvSessionId = id;
-
-    const out = { session_id: id, base_url: baseUrl, created_at: now };
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
+    const record = store.getOrCreateEnvVirtualeSession();
+    return textResult({ session_id: record.id, base_url: baseUrl, created_at: record.createdAtIso });
   }
 );
 
-let virtualeBrowserSessionId: string | undefined;
+let browserSessionId: string | undefined;
+
+function capturedServices(record: SessionRecord): { virtuale: boolean; almaesami: boolean; rps: boolean } {
+  return {
+    virtuale: Boolean(record.virtuale),
+    almaesami: Boolean(record.almaesami),
+    rps: Boolean(record.rps)
+  };
+}
+
+async function handleBrowserLogin({ force_relogin }: { force_relogin: boolean }) {
+  if (!ssoEmail || !ssoPassword) {
+    throw new Error("EMAIL and PASSWORD are not both set in the server environment.");
+  }
+
+  const existing = !force_relogin && browserSessionId ? store.get(browserSessionId) : undefined;
+  if (existing) {
+    return textResult({
+      session_id: existing.id,
+      base_url: baseUrl,
+      created_at: existing.createdAtIso,
+      reused: true,
+      services: capturedServices(existing)
+    });
+  }
+
+  const result = await loginWithBrowser({
+    baseUrl,
+    email: ssoEmail,
+    password: ssoPassword,
+    almaesamiUrl: browserAlmaesamiUrl,
+    rpsUrl: browserRpsUrl
+  });
+
+  const virtuale = result.virtuale.ok
+    ? { sesskey: result.virtuale.sesskey, cookies: result.virtuale.cookies }
+    : undefined;
+  const almaesami = result.almaesami.ok ? { cookies: result.almaesami.cookies } : undefined;
+  const rps = result.rps.ok ? { cookies: result.rps.cookies } : undefined;
+
+  const errors: Record<string, string> = {};
+  if (!result.virtuale.ok) errors.virtuale = result.virtuale.error;
+  if (!result.almaesami.ok) errors.almaesami = result.almaesami.error;
+  if (!result.rps.ok) errors.rps = result.rps.error;
+
+  if (!virtuale && !almaesami && !rps) {
+    throw new Error(
+      `Browser login captured no services. virtuale: ${errors.virtuale}; almaesami: ${errors.almaesami}; rps: ${errors.rps}`
+    );
+  }
+
+  // Drop any previous browser session so orphaned records don't accumulate.
+  if (browserSessionId) store.delete(browserSessionId);
+
+  const record = store.mint({ label: ssoEmail, origin: "browser", virtuale, almaesami, rps });
+  browserSessionId = record.id;
+
+  return textResult({
+    session_id: record.id,
+    base_url: baseUrl,
+    created_at: record.createdAtIso,
+    reused: false,
+    services: capturedServices(record),
+    ...(Object.keys(errors).length ? { errors } : {})
+  });
+}
 
 server.registerTool(
-  "virtuale_browser_login",
+  "unibo_browser_login",
   {
-    title: "Log In Via Headless Browser",
+    title: "Log In Via Headless Browser (all services)",
     description:
-      "Drives a real (headless) Chromium browser through the ADFS SSO login using EMAIL + PASSWORD from the server environment, then stores the resulting session and returns an opaque session_id — the password, sesskey, and cookies never pass through the model's context. Only works for accounts without interactive MFA; fails with a clear error otherwise (use virtuale_bootstrap_session instead for MFA accounts). Mints once and reuses the session on later calls unless force_relogin is set.",
+      "Drives a real (headless) Chromium browser through the ADFS SSO login using EMAIL + PASSWORD from the server environment, then — reusing the same shared idp.unibo.it session — completes the AlmaEsami and RPS SAML handshakes too, storing one session and returning an opaque session_id that works with the virtuale_*, almaesami_*, and rps_* tools. The password/sesskey/cookies never pass through the model's context. Each service is best-effort: the result reports per-service success. Only works for accounts without interactive MFA (use the *_bootstrap_session tools for MFA accounts). Mints once and reuses the session on later calls unless force_relogin is set.",
     inputSchema: {
       force_relogin: z.boolean().default(false)
     }
   },
-  async ({ force_relogin }) => {
-    if (!ssoEmail || !ssoPassword) {
-      throw new Error("EMAIL and PASSWORD are not both set in the server environment.");
+  handleBrowserLogin
+);
+
+// Deprecated alias kept for backward compatibility; same handler as
+// unibo_browser_login (which now covers all three services).
+server.registerTool(
+  "virtuale_browser_login",
+  {
+    title: "Log In Via Headless Browser (deprecated alias)",
+    description:
+      "Deprecated alias for unibo_browser_login. Drives a headless Chromium through ADFS SSO with EMAIL/PASSWORD and returns an opaque session_id (now covering AlmaEsami and RPS too). Prefer unibo_browser_login.",
+    inputSchema: {
+      force_relogin: z.boolean().default(false)
     }
-
-    const existing = !force_relogin && virtualeBrowserSessionId ? sessions.get(virtualeBrowserSessionId) : undefined;
-    if (existing) {
-      existing.updatedAtIso = new Date().toISOString();
-      const out = { session_id: existing.id, base_url: baseUrl, created_at: existing.createdAtIso, reused: true };
-      return {
-        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-        structuredContent: out
-      };
-    }
-
-    const login = await loginWithBrowser({ baseUrl, email: ssoEmail, password: ssoPassword });
-
-    const id = randomUUID();
-    const now = new Date().toISOString();
-    sessions.set(id, {
-      id,
-      email: ssoEmail,
-      sesskey: login.sesskey,
-      cookies: login.cookies,
-      createdAtIso: now,
-      updatedAtIso: now,
-      client: new VirtualeClient({ baseUrl, sesskey: login.sesskey, cookies: login.cookies })
-    });
-    virtualeBrowserSessionId = id;
-
-    const out = { session_id: id, base_url: baseUrl, created_at: now, reused: false };
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
-  }
+  },
+  handleBrowserLogin
 );
 
 server.registerTool(
@@ -294,27 +384,30 @@ server.registerTool(
     }
   },
   async ({ session_id, include_cookie_header }) => {
-    const session = sessions.get(session_id);
-    if (!session) {
+    const record = store.get(session_id);
+    if (!record) {
       throw new Error("Unknown session_id.");
     }
 
     const out: Record<string, unknown> = {
-      session_id: session.id,
-      email: session.email,
-      created_at: session.createdAtIso,
-      last_used_at: session.updatedAtIso
+      session_id: record.id,
+      email: record.label,
+      origin: record.origin,
+      services: capturedServices(record),
+      created_at: record.createdAtIso,
+      last_used_at: record.updatedAtIso
     };
 
     if (include_cookie_header) {
-      out.sesskey = session.sesskey;
-      out.cookies = session.cookies;
+      out.sesskey = record.virtuale?.sesskey;
+      out.cookies = {
+        virtuale: record.virtuale?.cookies,
+        almaesami: record.almaesami?.cookies,
+        rps: record.rps?.cookies
+      };
     }
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
+    return textResult(out);
   }
 );
 
@@ -328,13 +421,9 @@ server.registerTool(
     }
   },
   async ({ session_id }) => {
-    const removed = sessions.delete(session_id);
-    const out = { session_id, removed };
-
-    return {
-      content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-      structuredContent: out
-    };
+    const removed = store.delete(session_id);
+    if (browserSessionId === session_id) browserSessionId = undefined;
+    return textResult({ session_id, removed });
   }
 );
 
@@ -354,11 +443,13 @@ server.registerTool(
     });
 
     return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
       structuredContent: { data }
     };
   }
 );
+
+// --- Timetable / calendar (public) ------------------------------------------
 
 server.registerTool(
   "unibo_calendar_resolve_timetable_url",
@@ -371,10 +462,7 @@ server.registerTool(
   },
   async ({ unibo_course_url }) => {
     const data = await resolveTimetableUrl(unibo_course_url);
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    return textResult(data as Record<string, unknown>);
   }
 );
 
@@ -389,10 +477,7 @@ server.registerTool(
   },
   async ({ timetable_url }) => {
     const data = await listCurricula(timetable_url);
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    return textResult(data as Record<string, unknown>);
   }
 );
 
@@ -409,10 +494,7 @@ server.registerTool(
   },
   async ({ timetable_url, year, curriculum }) => {
     const data = await listTeachings(timetable_url, year, curriculum);
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    return textResult(data as Record<string, unknown>);
   }
 );
 
@@ -435,10 +517,7 @@ server.registerTool(
       curriculum,
       selectedTeachingCodes: selected_teaching_codes
     });
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -472,11 +551,13 @@ server.registerTool(
     };
 
     return {
-      content: [{ type: "text", text: ics }],
+      content: [{ type: "text" as const, text: ics }],
       structuredContent: out
     };
   }
 );
+
+// --- Virtuale (authenticated AJAX) ------------------------------------------
 
 server.registerTool(
   "virtuale_get_enrolled_courses",
@@ -494,15 +575,14 @@ server.registerTool(
     }
   },
   async ({ session_id, ...args }) => {
-    const client = getClientForSession(session_id);
-    const result = await client.callService("local_uniboapi_get_enrolled_courses_unibo", args);
-
-    if (result.error) {
-      throw new Error(`virtuale_get_enrolled_courses failed: ${result.message ?? "unknown error"}`);
-    }
-
+    const result = await callVirtualeService(
+      session_id,
+      "virtuale_get_enrolled_courses",
+      "local_uniboapi_get_enrolled_courses_unibo",
+      args
+    );
     return {
-      content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }],
       structuredContent: { data: result.data }
     };
   }
@@ -519,18 +599,18 @@ server.registerTool(
     }
   },
   async ({ session_id, courseid }) => {
-    const client = getClientForSession(session_id);
-    const result = await client.callService("core_courseformat_get_state", { courseid });
-
-    if (result.error) {
-      throw new Error(`virtuale_get_course_state failed: ${result.message ?? "unknown error"}`);
-    }
+    const result = await callVirtualeService(
+      session_id,
+      "virtuale_get_course_state",
+      "core_courseformat_get_state",
+      { courseid }
+    );
 
     const rawData = result.data;
     const parsedState = typeof rawData === "string" ? JSON.parse(rawData) : rawData;
 
     return {
-      content: [{ type: "text", text: JSON.stringify(parsedState, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify(parsedState, null, 2) }],
       structuredContent: { state: parsedState }
     };
   }
@@ -547,38 +627,20 @@ server.registerTool(
     }
   },
   async ({ session_id, courseid }) => {
-    const client = getClientForSession(session_id);
-    const result = await client.callService("block_panopto_get_content", { courseid });
-
-    if (result.error) {
-      throw new Error(`virtuale_get_panopto_content failed: ${result.message ?? "unknown error"}`);
-    }
-
+    const result = await callVirtualeService(
+      session_id,
+      "virtuale_get_panopto_content",
+      "block_panopto_get_content",
+      { courseid }
+    );
     return {
-      content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }],
       structuredContent: { data: result.data }
     };
   }
 );
 
-function resolveVirtualeCookies(sessionId?: string, cookieOverride?: string): string {
-  if (cookieOverride) {
-    return cookieOverride;
-  }
-  if (sessionId) {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      throw new Error("Unknown session_id.");
-    }
-    return session.cookies;
-  }
-  if (cookies) {
-    return cookies;
-  }
-  throw new Error(
-    "No Virtuale cookie session available. Pass `cookies` (MoodleSession=...), a `session_id` from virtuale_bootstrap_session, or set VIRTUALE_COOKIES."
-  );
-}
+// --- Virtuale quizzes (authenticated, HTML scrape) --------------------------
 
 server.registerTool(
   "virtuale_quiz_list_course_quizzes",
@@ -593,14 +655,10 @@ server.registerTool(
     }
   },
   async ({ course_id, session_id, cookies: cookieOverride, base_url }) => {
-    const data = await getCourseQuizzes(course_id, {
-      cookies: resolveVirtualeCookies(session_id, cookieOverride),
-      baseUrl: base_url ?? baseUrl
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) =>
+      getCourseQuizzes(course_id, ctx)
+    );
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -618,14 +676,8 @@ server.registerTool(
     }
   },
   async ({ cmid, session_id, cookies: cookieOverride, base_url }) => {
-    const data = await getQuizAttempts(cmid, {
-      cookies: resolveVirtualeCookies(session_id, cookieOverride),
-      baseUrl: base_url ?? baseUrl
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) => getQuizAttempts(cmid, ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -644,87 +696,20 @@ server.registerTool(
     }
   },
   async ({ attempt_id, cmid, session_id, cookies: cookieOverride, base_url }) => {
-    const data = await getAttemptReview(attempt_id, cmid, {
-      cookies: resolveVirtualeCookies(session_id, cookieOverride),
-      baseUrl: base_url ?? baseUrl
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) =>
+      getAttemptReview(attempt_id, cmid, ctx)
+    );
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
-/**
- * Generic env-backed cookie session store, shared by AlmaEsami and RPS (both
- * are plain cookie-header auth, unlike Virtuale's sesskey+cookie sessions
- * above). One tool per service mints/reuses a session_id from that service's
- * env var; the cookie itself is never echoed back to the caller.
- */
-type CookieSessionRecord = {
-  id: string;
-  service: string;
-  cookies: string;
-  baseUrl: string;
-  createdAtIso: string;
-  updatedAtIso: string;
-};
+// --- AlmaEsami / RPS shared session tools -----------------------------------
 
-const cookieSessions = new Map<string, CookieSessionRecord>();
-const envCookieSessionIds = new Map<string, string>();
-
-function getOrCreateEnvCookieSession(service: string, envCookies: string | undefined, baseUrl: string, envVarName: string): CookieSessionRecord {
-  if (!envCookies) {
-    throw new Error(`${envVarName} is not set in the server environment.`);
-  }
-
-  const existing = cookieSessions.get(envCookieSessionIds.get(service) ?? "");
-  if (existing) {
-    existing.updatedAtIso = new Date().toISOString();
-    return existing;
-  }
-
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const record: CookieSessionRecord = { id, service, cookies: envCookies, baseUrl, createdAtIso: now, updatedAtIso: now };
-  cookieSessions.set(id, record);
-  envCookieSessionIds.set(service, id);
-  return record;
-}
-
-function resolveCookieSession(
-  service: string,
-  sessionId: string | undefined,
-  inputCookies: string | undefined,
-  envCookies: string | undefined,
-  baseUrlOverride: string | undefined,
-  defaultBaseUrl: string,
-  envVarName: string
-): { cookies: string; baseUrl: string } {
-  if (sessionId) {
-    const session = cookieSessions.get(sessionId);
-    if (!session || session.service !== service) {
-      throw new Error(`Unknown ${service} session_id.`);
-    }
-    session.updatedAtIso = new Date().toISOString();
-    return { cookies: session.cookies, baseUrl: session.baseUrl };
-  }
-
-  const cookies = inputCookies ?? envCookies;
-  if (!cookies) {
-    throw new Error(
-      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see ${service}_get_env_session), or set ${envVarName}.`
-    );
-  }
-  return { cookies, baseUrl: baseUrlOverride ?? defaultBaseUrl };
-}
-
+/** Registers a `<service>_get_env_session` tool backed by the store. */
 function registerEnvCookieSessionTool(opts: {
   toolName: string;
   title: string;
-  service: string;
-  envCookies: string | undefined;
-  baseUrl: string;
+  service: "almaesami" | "rps";
   envVarName: string;
 }) {
   server.registerTool(
@@ -735,12 +720,49 @@ function registerEnvCookieSessionTool(opts: {
       inputSchema: {}
     },
     async () => {
-      const session = getOrCreateEnvCookieSession(opts.service, opts.envCookies, opts.baseUrl, opts.envVarName);
-      const out = { session_id: session.id, base_url: session.baseUrl, created_at: session.createdAtIso };
-      return {
-        content: [{ type: "text", text: JSON.stringify(out, null, 2) }],
-        structuredContent: out
-      };
+      const record = store.getOrCreateEnvCookieSession(opts.service);
+      return textResult({
+        session_id: record.id,
+        base_url: store.baseUrlFor(opts.service),
+        created_at: record.createdAtIso
+      });
+    }
+  );
+}
+
+/** Registers a `<service>_bootstrap_session` tool: paste a cookie header, get
+ * an opaque session_id; the cookie is never echoed back. */
+function registerCookieBootstrapTool(opts: {
+  toolName: string;
+  title: string;
+  service: "almaesami" | "rps";
+  cookieDescription: string;
+  defaultLabel: string;
+}) {
+  server.registerTool(
+    opts.toolName,
+    {
+      title: opts.title,
+      description: `Creates a server-side session from an existing ${opts.service} cookie header (${opts.cookieDescription}). Returns an opaque session_id; the cookie is never echoed back.`,
+      inputSchema: {
+        cookies: z.string().min(1).describe(opts.cookieDescription),
+        label: z.string().default(opts.defaultLabel)
+      }
+    },
+    async ({ cookies: inputCookies, label }) => {
+      const record = store.mint({
+        label,
+        origin: "bootstrap",
+        [opts.service]: { cookies: inputCookies }
+      });
+      return textResult({
+        session_id: record.id,
+        service: opts.service,
+        base_url: store.baseUrlFor(opts.service),
+        source: "bootstrap",
+        created_at: record.createdAtIso,
+        label
+      });
     }
   );
 }
@@ -752,21 +774,24 @@ const almaesamiCookiesSchema = z
   .describe(
     "Cookie header with an authenticated JSESSIONID from a logged-in AlmaEsami browser session. Falls back to session_id, then ALMAESAMI_COOKIES."
   );
-const almaesamiSessionIdSchema = z.string().min(1).optional().describe("session_id from almaesami_get_env_session.");
+const almaesamiSessionIdSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe("session_id from almaesami_get_env_session, almaesami_bootstrap_session, or unibo_browser_login.");
 
-function resolveAlmaesamiContext(sessionId?: string, inputCookies?: string, baseUrlOverride?: string): {
-  cookies: string;
-  baseUrl: string;
-} {
-  return resolveCookieSession("almaesami", sessionId, inputCookies, almaesamiCookies, baseUrlOverride, almaesamiBaseUrl, "ALMAESAMI_COOKIES");
-}
+registerCookieBootstrapTool({
+  toolName: "almaesami_bootstrap_session",
+  title: "Bootstrap AlmaEsami Session",
+  service: "almaesami",
+  cookieDescription: "JSESSIONID cookie header for almaesami.unibo.it",
+  defaultLabel: "almaesami-bootstrap"
+});
 
 registerEnvCookieSessionTool({
   toolName: "almaesami_get_env_session",
   title: "Get AlmaEsami Env-Backed Session",
   service: "almaesami",
-  envCookies: almaesamiCookies,
-  baseUrl: almaesamiBaseUrl,
   envVarName: "ALMAESAMI_COOKIES"
 });
 
@@ -783,11 +808,8 @@ server.registerTool(
     }
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
-    const data = await getExamPlan(resolveAlmaesamiContext(session_id, inputCookies, base_url));
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) => getExamPlan(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -804,11 +826,8 @@ server.registerTool(
     }
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
-    const data = await getExamHistory(resolveAlmaesamiContext(session_id, inputCookies, base_url));
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) => getExamHistory(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -825,11 +844,8 @@ server.registerTool(
     }
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
-    const data = await getMessages(resolveAlmaesamiContext(session_id, inputCookies, base_url));
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) => getMessages(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -840,21 +856,24 @@ const rpsCookiesSchema = z
   .describe(
     "Cookie header with an authenticated PHPSESSID from a logged-in RPS browser session. Falls back to session_id, then RPS_COOKIES."
   );
-const rpsSessionIdSchema = z.string().min(1).optional().describe("session_id from rps_get_env_session.");
+const rpsSessionIdSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .describe("session_id from rps_get_env_session, rps_bootstrap_session, or unibo_browser_login.");
 
-function resolveRpsContext(sessionId?: string, inputCookies?: string, baseUrlOverride?: string): {
-  cookies: string;
-  baseUrl: string;
-} {
-  return resolveCookieSession("rps", sessionId, inputCookies, rpsCookies, baseUrlOverride, rpsBaseUrl, "RPS_COOKIES");
-}
+registerCookieBootstrapTool({
+  toolName: "rps_bootstrap_session",
+  title: "Bootstrap RPS Session",
+  service: "rps",
+  cookieDescription: "PHPSESSID cookie header for rps.unibo.it",
+  defaultLabel: "rps-bootstrap"
+});
 
 registerEnvCookieSessionTool({
   toolName: "rps_get_env_session",
   title: "Get RPS Env-Backed Session",
   service: "rps",
-  envCookies: rpsCookies,
-  baseUrl: rpsBaseUrl,
   envVarName: "RPS_COOKIES"
 });
 
@@ -871,11 +890,8 @@ server.registerTool(
     }
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
-    const data = await getAttendanceRecords(resolveRpsContext(session_id, inputCookies, base_url));
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runCookieService("rps", session_id, inputCookies, base_url, (ctx) => getAttendanceRecords(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 
@@ -892,11 +908,8 @@ server.registerTool(
     }
   },
   async ({ session_id, cookies: inputCookies, base_url }) => {
-    const data = await getRegister(resolveRpsContext(session_id, inputCookies, base_url));
-    return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data
-    };
+    const data = await runCookieService("rps", session_id, inputCookies, base_url, (ctx) => getRegister(ctx));
+    return textResult(data as unknown as Record<string, unknown>);
   }
 );
 

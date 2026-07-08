@@ -1,5 +1,7 @@
 import { load } from "cheerio";
 
+import { ALMAESAMI_EXPIRED_MESSAGE, SessionExpiredError, isAlmaesamiAuthExpired } from "./sessions.js";
+
 /**
  * AlmaEsami (almaesami.unibo.it) student read-only scrapers.
  *
@@ -68,23 +70,14 @@ export type StudentMessage = {
   sender: string;
 };
 
-function isUnauthenticated(html: string): boolean {
-  return (
-    /SAMLRequest|idp\.unibo\.it\/adfs/i.test(html) ||
-    /sessionExpired|sessione scaduta/i.test(html)
-  );
-}
-
 /**
  * Extract the rows of the first `table.iceDataTblOutline` as a matrix of
  * trimmed cell texts. Throws with a clear message on an expired/absent session
  * or a missing grid, so every reader gets consistent error handling.
  */
-function readGridRows(html: string): string[][] {
-  if (isUnauthenticated(html)) {
-    throw new Error(
-      "AlmaEsami session is missing or expired (SSO login / sessione scaduta). Re-capture the JSESSIONID cookie from a logged-in browser."
-    );
+function readGridRows(html: string, url = ""): string[][] {
+  if (isAlmaesamiAuthExpired(html, url)) {
+    throw new SessionExpiredError("almaesami", ALMAESAMI_EXPIRED_MESSAGE);
   }
 
   const $ = load(html);
@@ -134,10 +127,10 @@ function splitActivityWithCds(cell: string): { code: string; name: string; cds: 
 }
 
 /** Parse the "Riepilogo Esami Studente" exam-plan grid. Pure/testable. */
-export function parseExamPlan(html: string): { entries: ExamPlanEntry[] } {
+export function parseExamPlan(html: string, url = ""): { entries: ExamPlanEntry[] } {
   const entries: ExamPlanEntry[] = [];
 
-  for (const cells of readGridRows(html)) {
+  for (const cells of readGridRows(html, url)) {
     if (cells.length < 7) {
       continue;
     }
@@ -166,10 +159,10 @@ export function parseExamPlan(html: string): { entries: ExamPlanEntry[] } {
 }
 
 /** Parse the "Cronologia" exam-history grid. Pure/testable. */
-export function parseExamHistory(html: string): { entries: ExamHistoryEntry[] } {
+export function parseExamHistory(html: string, url = ""): { entries: ExamHistoryEntry[] } {
   const entries: ExamHistoryEntry[] = [];
 
-  for (const cells of readGridRows(html)) {
+  for (const cells of readGridRows(html, url)) {
     if (cells.length < 6) {
       continue;
     }
@@ -195,10 +188,10 @@ export function parseExamHistory(html: string): { entries: ExamHistoryEntry[] } 
 }
 
 /** Parse the student "Messaggi" grid. Pure/testable. */
-export function parseMessages(html: string): { messages: StudentMessage[] } {
+export function parseMessages(html: string, url = ""): { messages: StudentMessage[] } {
   const messages: StudentMessage[] = [];
 
-  for (const cells of readGridRows(html)) {
+  for (const cells of readGridRows(html, url)) {
     if (cells.length < 5) {
       continue;
     }
@@ -244,7 +237,7 @@ export async function getExamPlan(input: {
   baseUrl?: string;
 }): Promise<{ endpoint: string; total: number; entries: ExamPlanEntry[] }> {
   const { url, html } = await fetchStudentPage(EXAM_PLAN_PATH, input);
-  const { entries } = parseExamPlan(html);
+  const { entries } = parseExamPlan(html, url);
   return { endpoint: url, total: entries.length, entries };
 }
 
@@ -254,7 +247,7 @@ export async function getExamHistory(input: {
   baseUrl?: string;
 }): Promise<{ endpoint: string; total: number; entries: ExamHistoryEntry[] }> {
   const { url, html } = await fetchStudentPage(EXAM_HISTORY_PATH, input);
-  const { entries } = parseExamHistory(html);
+  const { entries } = parseExamHistory(html, url);
   return { endpoint: url, total: entries.length, entries };
 }
 
@@ -264,6 +257,6 @@ export async function getMessages(input: {
   baseUrl?: string;
 }): Promise<{ endpoint: string; total: number; messages: StudentMessage[] }> {
   const { url, html } = await fetchStudentPage(MESSAGES_PATH, input);
-  const { messages } = parseMessages(html);
+  const { messages } = parseMessages(html, url);
   return { endpoint: url, total: messages.length, messages };
 }
