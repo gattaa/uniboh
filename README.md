@@ -128,6 +128,11 @@ sees (course page → quiz page → attempt review page). Each accepts `session_
   review URL/attempt id) for finished attempts.
 - `virtuale_quiz_get_attempt_review` — one finished attempt's questions, answer options,
   the student's selection, correctness, and feedback.
+- `virtuale_quiz_sync_bank` — diffs a local quiz-bank JSON file (`bank_path`) against Moodle
+  attempts by `attempt_id`, fetches only the new attempt reviews, and appends them to the
+  file in the bank's schema (backing up to `<bank_path>.bak` first). `cmids` defaults to the
+  bank's own `quizzes` list; `dry_run` reports what would be fetched without writing. Writes
+  to disk; returns only a count summary, never question content.
 
 Scoped to reviewing attempts already finished and reviewable under the quiz's own review
 settings — it does not start, resume, or answer a live/in-progress attempt.

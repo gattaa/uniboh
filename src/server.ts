@@ -19,6 +19,7 @@ import {
 import { getExamPlan, getExamHistory, getMessages, getAppelli } from "./almaesami.js";
 import { getAttendanceRecords, getRegister } from "./rps.js";
 import { getCourseQuizzes, getQuizAttempts, getAttemptReview } from "./quiz.js";
+import { syncQuizBank } from "./quizBank.js";
 import { buildFileListing, getResource } from "./virtualeFiles.js";
 import { getCareer as getSolCareer, getServices as getSolServices } from "./sol.js";
 import {
@@ -772,6 +773,30 @@ server.registerTool(
   async ({ attempt_id, cmid, session_id, cookies: cookieOverride, base_url }) => {
     const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) =>
       getAttemptReview(attempt_id, cmid, ctx)
+    );
+    return textResult(data as unknown as Record<string, unknown>);
+  }
+);
+
+server.registerTool(
+  "virtuale_quiz_sync_bank",
+  {
+    annotations: READONLY,
+    title: "Sync Quiz Bank File",
+    description:
+      "Diffs a local quiz-bank JSON against Moodle attempts, fetches only new attempt reviews, appends them to the file in the bank schema, and returns a count summary. Writes to disk; returns no question content.",
+    inputSchema: {
+      bank_path: z.string().min(1),
+      session_id: z.string().optional(),
+      cookies: z.string().min(1).optional(),
+      base_url: z.string().url().optional(),
+      cmids: z.array(z.number().int().positive()).optional(),
+      dry_run: z.boolean().default(false)
+    }
+  },
+  async ({ bank_path, session_id, cookies: cookieOverride, base_url, cmids, dry_run }) => {
+    const data = await runVirtualeQuiz(session_id, cookieOverride, base_url, (ctx) =>
+      syncQuizBank(bank_path, { cookies: ctx.cookies, baseUrl: ctx.baseUrl, cmids, dryRun: dry_run })
     );
     return textResult(data as unknown as Record<string, unknown>);
   }
