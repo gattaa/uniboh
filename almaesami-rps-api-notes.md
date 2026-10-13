@@ -16,15 +16,14 @@ This is Microsoft **ADFS** (`/adfs/ls/`), i.e. SAML 2.0 / WS-Federation, almost 
 with MFA for student accounts. Consequences for this project:
 
 - **Scripted username/password login is not viable** for these services — the ADFS form
-  plus MFA can't be driven by a simple form POST (the same limitation the Virtuale
-  `login_with_password` tool already documents).
+  plus MFA can't be driven by a simple form POST (the same limitation that made the
+  old Virtuale password-form login unreliable).
 - The dependable auth pattern is **bootstrap-with-cookies**: the user authenticates in a
   normal browser (doing SSO/MFA once), then exports the authenticated **session cookie for
-  that specific host**, which the server replays. This mirrors `virtuale_bootstrap_session`,
+  that specific host**, which the server replays. This mirrors `unibo_bootstrap_session`,
   but the cookie is per-host, not a Moodle `sesskey`.
 
-An eventual generic `<service>_bootstrap_session` tool + a per-host session store is the
-natural shape.
+The generic `unibo_bootstrap_session` tool + a per-host session store is that shape.
 
 ## AlmaEsami (almaesami.unibo.it)
 

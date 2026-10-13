@@ -8,8 +8,8 @@ and have not been cross-checked against a second account, so their selectors are
 ## Shared fact: same ADFS SAML SSO as the rest of the estate
 
 Like Virtuale / AlmaEsami / RPS, SOL federates to `idp.unibo.it/adfs/ls/`. So the same
-`unibo_browser_login` headless flow captures its cookie in one pass off the shared IdP
-session, and `sol_bootstrap_session` (paste a cookie) is the dependable MFA path. See
+`unibo_login` headless flow captures its cookie in one pass off the shared IdP
+session, and `unibo_bootstrap_session` (paste a cookie) is the dependable MFA path. See
 [almaesami-rps-api-notes.md](almaesami-rps-api-notes.md) for the shared SSO details.
 
 ## Stack & auth

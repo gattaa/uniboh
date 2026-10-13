@@ -7,7 +7,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 import { VirtualeClient, type ServiceCallResult } from "./virtualeClient.js";
-import { loginWithPassword } from "./login.js";
 import { loginWithBrowser } from "./browserAuth.js";
 import {
   eventsToIcs,
@@ -23,6 +22,7 @@ import { syncQuizBank } from "./quizBank.js";
 import { buildFileListing, getResource } from "./virtualeFiles.js";
 import { getCareer as getSolCareer, getServices as getSolServices } from "./sol.js";
 import {
+  NoCredentialsError,
   SessionExpiredError,
   SessionStore,
   VIRTUALE_EXPIRED_MESSAGE,
@@ -86,7 +86,8 @@ const canRelogin = (): boolean => Boolean(ssoEmail && ssoPassword);
 // expiry storm triggers at most one headless browser login at a time.
 let reloginPromise: Promise<void> | null = null;
 
-async function performRelogin(): Promise<void> {
+/** Headless browser login across all services; throws if nothing was captured. */
+async function browserLogin(): Promise<{ refresh: ServiceRefresh; errors: Record<string, string> }> {
   const result = await loginWithBrowser({
     baseUrl,
     email: ssoEmail!,
@@ -96,11 +97,37 @@ async function performRelogin(): Promise<void> {
     solUrl: browserSolUrl
   });
   const refresh: ServiceRefresh = {};
+  const errors: Record<string, string> = {};
   if (result.virtuale.ok) refresh.virtuale = { sesskey: result.virtuale.sesskey, cookies: result.virtuale.cookies };
+  else errors.virtuale = result.virtuale.error;
   if (result.almaesami.ok) refresh.almaesami = { cookies: result.almaesami.cookies };
+  else errors.almaesami = result.almaesami.error;
   if (result.rps.ok) refresh.rps = { cookies: result.rps.cookies };
+  else errors.rps = result.rps.error;
   if (result.sol.ok) refresh.sol = { cookies: result.sol.cookies };
+  else errors.sol = result.sol.error;
+
+  if (Object.keys(errors).length === 4) {
+    throw new Error(
+      `Browser login captured no services. virtuale: ${errors.virtuale}; almaesami: ${errors.almaesami}; rps: ${errors.rps}; sol: ${errors.sol}`
+    );
+  }
+  return { refresh, errors };
+}
+
+/** Mint a browser-origin record from fresh credentials and make it the store's default. */
+function mintBrowserSession(refresh: ServiceRefresh): SessionRecord {
+  if (store.browserSessionId) store.delete(store.browserSessionId);
+  const record = store.mint({ label: ssoEmail!, origin: "browser", ...refresh });
+  store.browserSessionId = record.id;
+  return record;
+}
+
+async function performRelogin(): Promise<void> {
+  const { refresh } = await browserLogin();
   store.applyRefresh(refresh);
+  // First-ever login (nothing to refresh in place): mint the default session.
+  if (!store.browserSessionId || !store.get(store.browserSessionId)) mintBrowserSession(refresh);
 }
 
 async function reloginOnce(): Promise<void> {
@@ -114,27 +141,30 @@ async function reloginOnce(): Promise<void> {
 
 /**
  * Run `work` against freshly resolved credentials. If it fails with a
- * {@link SessionExpiredError} and the credentials are refreshable (env- or
- * browser-login-backed) and EMAIL+PASSWORD are configured, transparently
- * re-run the browser login once, update the stored session, and retry once.
- * User-pasted (bootstrap/password) sessions and inline cookie overrides are
+ * {@link SessionExpiredError} on refreshable credentials (env- or
+ * browser-login-backed), or resolving finds no credentials at all
+ * ({@link NoCredentialsError}), and EMAIL+PASSWORD are configured,
+ * transparently run the browser login once and retry once.
+ * User-pasted (bootstrap) sessions and inline cookie overrides are
  * never auto-refreshed — their cookies aren't ours to renew.
  */
 async function withAutoRelogin<Ctx, T>(
   resolve: () => { context: Ctx; refreshable: boolean },
   work: (ctx: Ctx) => Promise<T>
 ): Promise<T> {
-  const first = resolve();
+  let refreshable = false;
   try {
+    const first = resolve();
+    refreshable = first.refreshable;
     return await work(first.context);
   } catch (err) {
-    if (!(err instanceof SessionExpiredError) || !first.refreshable || !canRelogin()) {
+    const retryable = err instanceof NoCredentialsError || (err instanceof SessionExpiredError && refreshable);
+    if (!retryable || !canRelogin()) {
       throw err;
     }
     await reloginOnce();
     // Re-resolve so we pick up the refreshed credentials from the store.
-    const second = resolve();
-    return work(second.context);
+    return work(resolve().context);
   }
 }
 
@@ -206,101 +236,6 @@ const READONLY = { readOnlyHint: true, openWorldHint: true } as const;
 
 // --- Session management ------------------------------------------------------
 
-server.registerTool(
-  "virtuale_login_with_password",
-  {
-    title: "Login With Password",
-    description: "Attempts Moodle form login, then stores cookies and sesskey server-side and returns a session_id.",
-    inputSchema: {
-      email: z.string().email(),
-      password: z.string().min(1),
-      login_path: z.string().default("/login/index.php"),
-      include_cookie_header: z.boolean().default(false)
-    }
-  },
-  async ({ email, password, login_path, include_cookie_header }) => {
-    const login = await loginWithPassword({
-      baseUrl,
-      email,
-      password,
-      loginPath: login_path
-    });
-
-    const record = store.mint({
-      label: email,
-      origin: "password",
-      virtuale: { sesskey: login.sesskey, cookies: login.cookies }
-    });
-
-    const out: Record<string, unknown> = {
-      session_id: record.id,
-      base_url: baseUrl,
-      login_url: login.loginUrl,
-      final_url: login.finalUrl,
-      created_at: record.createdAtIso
-    };
-
-    if (include_cookie_header) {
-      out.sesskey = login.sesskey;
-      out.cookies = login.cookies;
-    }
-
-    return textResult(out);
-  }
-);
-
-server.registerTool(
-  "virtuale_bootstrap_session",
-  {
-    title: "Bootstrap Session",
-    description: "Creates a server-side session from an existing sesskey and cookie header.",
-    inputSchema: {
-      sesskey: z.string().min(1),
-      cookies: z.string().min(1),
-      email_label: z.string().default("external-session"),
-      include_cookie_header: z.boolean().default(false)
-    }
-  },
-  async ({ sesskey: inputSesskey, cookies: inputCookies, email_label, include_cookie_header }) => {
-    const record = store.mint({
-      label: email_label,
-      origin: "bootstrap",
-      virtuale: { sesskey: inputSesskey, cookies: inputCookies }
-    });
-
-    const out: Record<string, unknown> = {
-      session_id: record.id,
-      sesskey: inputSesskey,
-      base_url: baseUrl,
-      source: "bootstrap",
-      created_at: record.createdAtIso,
-      label: email_label
-    };
-
-    if (include_cookie_header) {
-      out.cookies = inputCookies;
-    }
-
-    return textResult(out);
-  }
-);
-
-server.registerTool(
-  "virtuale_get_env_session",
-  {
-    title: "Get Env-Backed Session",
-    description:
-      "Mints (or reuses) a session_id backed by the server's VIRTUALE_SESSKEY + VIRTUALE_COOKIES env vars. The sesskey/cookies are never returned — only an opaque session_id, so credentials configured in the MCP host's environment never pass through the model's context.",
-    inputSchema: {}
-  },
-  async () => {
-    const record = store.getOrCreateEnvVirtualeSession();
-    return textResult({ session_id: record.id, base_url: baseUrl, created_at: record.createdAtIso });
-  }
-);
-
-let browserSessionId: string | undefined;
-
 function capturedServices(record: SessionRecord): {
   virtuale: boolean;
   almaesami: boolean;
@@ -315,100 +250,86 @@ function capturedServices(record: SessionRecord): {
   };
 }
 
-async function handleBrowserLogin({ force_relogin }: { force_relogin: boolean }) {
-  if (!ssoEmail || !ssoPassword) {
-    throw new Error("EMAIL and PASSWORD are not both set in the server environment.");
-  }
-
-  const existing = !force_relogin && browserSessionId ? store.get(browserSessionId) : undefined;
-  if (existing) {
-    return textResult({
-      session_id: existing.id,
-      base_url: baseUrl,
-      created_at: existing.createdAtIso,
-      reused: true,
-      services: capturedServices(existing)
-    });
-  }
-
-  const result = await loginWithBrowser({
-    baseUrl,
-    email: ssoEmail,
-    password: ssoPassword,
-    almaesamiUrl: browserAlmaesamiUrl,
-    rpsUrl: browserRpsUrl,
-    solUrl: browserSolUrl
-  });
-
-  const virtuale = result.virtuale.ok
-    ? { sesskey: result.virtuale.sesskey, cookies: result.virtuale.cookies }
-    : undefined;
-  const almaesami = result.almaesami.ok ? { cookies: result.almaesami.cookies } : undefined;
-  const rps = result.rps.ok ? { cookies: result.rps.cookies } : undefined;
-  const sol = result.sol.ok ? { cookies: result.sol.cookies } : undefined;
-
-  const errors: Record<string, string> = {};
-  if (!result.virtuale.ok) errors.virtuale = result.virtuale.error;
-  if (!result.almaesami.ok) errors.almaesami = result.almaesami.error;
-  if (!result.rps.ok) errors.rps = result.rps.error;
-  if (!result.sol.ok) errors.sol = result.sol.error;
-
-  if (!virtuale && !almaesami && !rps && !sol) {
-    throw new Error(
-      `Browser login captured no services. virtuale: ${errors.virtuale}; almaesami: ${errors.almaesami}; rps: ${errors.rps}; sol: ${errors.sol}`
-    );
-  }
-
-  // Drop any previous browser session so orphaned records don't accumulate.
-  if (browserSessionId) store.delete(browserSessionId);
-
-  const record = store.mint({ label: ssoEmail, origin: "browser", virtuale, almaesami, rps, sol });
-  browserSessionId = record.id;
-
-  return textResult({
-    session_id: record.id,
-    base_url: baseUrl,
-    created_at: record.createdAtIso,
-    reused: false,
-    services: capturedServices(record),
-    ...(Object.keys(errors).length ? { errors } : {})
-  });
-}
-
 server.registerTool(
-  "unibo_browser_login",
+  "unibo_login",
   {
     title: "Log In Via Headless Browser (all services)",
     description:
-      "Drives a real (headless) Chromium browser through the ADFS SSO login using EMAIL + PASSWORD from the server environment, then — reusing the same shared idp.unibo.it session — completes the AlmaEsami and RPS SAML handshakes too, storing one session and returning an opaque session_id that works with the virtuale_*, almaesami_*, and rps_* tools. The password/sesskey/cookies never pass through the model's context. Each service is best-effort: the result reports per-service success. Only works for accounts without interactive MFA (use the *_bootstrap_session tools for MFA accounts). Mints once and reuses the session on later calls unless force_relogin is set.",
+      "Normally unnecessary: when EMAIL + PASSWORD are set, every tool logs in automatically on first use. Drives a real (headless) Chromium browser through the ADFS SSO login using EMAIL + PASSWORD from the server environment, then — reusing the same shared idp.unibo.it session — completes the AlmaEsami, RPS and SOL SAML handshakes too, storing one session and returning an opaque session_id that works with every authenticated tool. The password/sesskey/cookies never pass through the model's context. Each service is best-effort: the result reports per-service success. Only works for accounts without interactive MFA (use unibo_bootstrap_session for MFA accounts). Mints once and reuses the session on later calls unless force_relogin is set.",
     inputSchema: {
       force_relogin: z.boolean().default(false)
     }
   },
-  handleBrowserLogin
+  async ({ force_relogin }) => {
+    if (!canRelogin()) {
+      throw new Error("EMAIL and PASSWORD are not both set in the server environment.");
+    }
+
+    const existing = !force_relogin && store.browserSessionId ? store.get(store.browserSessionId) : undefined;
+    if (existing) {
+      return textResult({
+        session_id: existing.id,
+        base_url: baseUrl,
+        created_at: existing.createdAtIso,
+        reused: true,
+        services: capturedServices(existing)
+      });
+    }
+
+    const { refresh, errors } = await browserLogin();
+    const record = mintBrowserSession(refresh);
+
+    return textResult({
+      session_id: record.id,
+      base_url: baseUrl,
+      created_at: record.createdAtIso,
+      reused: false,
+      services: capturedServices(record),
+      ...(Object.keys(errors).length ? { errors } : {})
+    });
+  }
 );
 
-// Deprecated alias kept for backward compatibility; same handler as
-// unibo_browser_login (which now covers all three services).
 server.registerTool(
-  "virtuale_browser_login",
+  "unibo_bootstrap_session",
   {
-    title: "Log In Via Headless Browser (deprecated alias)",
+    title: "Bootstrap Session",
     description:
-      "Deprecated alias for unibo_browser_login. Drives a headless Chromium through ADFS SSO with EMAIL/PASSWORD and returns an opaque session_id (now covering AlmaEsami and RPS too). Prefer unibo_browser_login.",
+      "Creates a server-side session from credentials pasted from a logged-in browser (the dependable path for MFA accounts). Returns an opaque session_id; the cookie/sesskey is never echoed back. For virtuale pass the MoodleSession cookie header plus `sesskey`; for almaesami/rps/sol pass the JSESSIONID / PHPSESSID / JSESSIONID cookie header.",
     inputSchema: {
-      force_relogin: z.boolean().default(false)
+      service: z.enum(["virtuale", "almaesami", "rps", "sol"]),
+      cookies: z.string().min(1),
+      sesskey: z.string().min(1).optional().describe("Required when service is virtuale."),
+      label: z.string().default("external-session")
     }
   },
-  handleBrowserLogin
+  async ({ service, cookies: inputCookies, sesskey: inputSesskey, label }) => {
+    if (service === "virtuale" && !inputSesskey) {
+      throw new Error("`sesskey` is required when service is virtuale.");
+    }
+    const record = store.mint({
+      label,
+      origin: "bootstrap",
+      [service]: service === "virtuale" ? { sesskey: inputSesskey, cookies: inputCookies } : { cookies: inputCookies }
+    });
+    return textResult({
+      session_id: record.id,
+      service,
+      base_url: store.baseUrlFor(service),
+      source: "bootstrap",
+      created_at: record.createdAtIso,
+      label
+    });
+  }
 );
 
 server.registerTool(
-  "virtuale_get_session_info",
+  "unibo_get_session_info",
   {
     annotations: READONLY,
     title: "Get Session Info",
-    description: "Shows stored login metadata and optionally returns cookie header string.",
+    description:
+      "Shows stored login metadata (origin, which services the session carries) and optionally returns cookie header strings.",
     inputSchema: {
       session_id: z.string().min(1),
       include_cookie_header: z.boolean().default(false)
@@ -444,7 +365,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "virtuale_logout_session",
+  "unibo_logout",
   {
     title: "Logout Session",
     description: "Removes one stored authenticated session from server memory.",
@@ -454,7 +375,6 @@ server.registerTool(
   },
   async ({ session_id }) => {
     const removed = store.delete(session_id);
-    if (browserSessionId === session_id) browserSessionId = undefined;
     return textResult({ session_id, removed });
   }
 );
@@ -832,69 +752,7 @@ server.registerTool(
   }
 );
 
-// --- AlmaEsami / RPS shared session tools -----------------------------------
-
-/** Registers a `<service>_get_env_session` tool backed by the store. */
-function registerEnvCookieSessionTool(opts: {
-  toolName: string;
-  title: string;
-  service: "almaesami" | "rps" | "sol";
-  envVarName: string;
-}) {
-  server.registerTool(
-    opts.toolName,
-    {
-      title: opts.title,
-      description: `Mints (or reuses) a session_id backed by the server's ${opts.envVarName} env var. The cookie is never returned — only an opaque session_id.`,
-      inputSchema: {}
-    },
-    async () => {
-      const record = store.getOrCreateEnvCookieSession(opts.service);
-      return textResult({
-        session_id: record.id,
-        base_url: store.baseUrlFor(opts.service),
-        created_at: record.createdAtIso
-      });
-    }
-  );
-}
-
-/** Registers a `<service>_bootstrap_session` tool: paste a cookie header, get
- * an opaque session_id; the cookie is never echoed back. */
-function registerCookieBootstrapTool(opts: {
-  toolName: string;
-  title: string;
-  service: "almaesami" | "rps" | "sol";
-  cookieDescription: string;
-  defaultLabel: string;
-}) {
-  server.registerTool(
-    opts.toolName,
-    {
-      title: opts.title,
-      description: `Creates a server-side session from an existing ${opts.service} cookie header (${opts.cookieDescription}). Returns an opaque session_id; the cookie is never echoed back.`,
-      inputSchema: {
-        cookies: z.string().min(1).describe(opts.cookieDescription),
-        label: z.string().default(opts.defaultLabel)
-      }
-    },
-    async ({ cookies: inputCookies, label }) => {
-      const record = store.mint({
-        label,
-        origin: "bootstrap",
-        [opts.service]: { cookies: inputCookies }
-      });
-      return textResult({
-        session_id: record.id,
-        service: opts.service,
-        base_url: store.baseUrlFor(opts.service),
-        source: "bootstrap",
-        created_at: record.createdAtIso,
-        label
-      });
-    }
-  );
-}
+// --- AlmaEsami ---------------------------------------------------------
 
 const almaesamiCookiesSchema = z
   .string()
@@ -907,22 +765,7 @@ const almaesamiSessionIdSchema = z
   .string()
   .min(1)
   .optional()
-  .describe("session_id from almaesami_get_env_session, almaesami_bootstrap_session, or unibo_browser_login.");
-
-registerCookieBootstrapTool({
-  toolName: "almaesami_bootstrap_session",
-  title: "Bootstrap AlmaEsami Session",
-  service: "almaesami",
-  cookieDescription: "JSESSIONID cookie header for almaesami.unibo.it",
-  defaultLabel: "almaesami-bootstrap"
-});
-
-registerEnvCookieSessionTool({
-  toolName: "almaesami_get_env_session",
-  title: "Get AlmaEsami Env-Backed Session",
-  service: "almaesami",
-  envVarName: "ALMAESAMI_COOKIES"
-});
+  .describe("session_id from unibo_login or unibo_bootstrap_session.");
 
 server.registerTool(
   "almaesami_get_exam_plan",
@@ -1020,22 +863,7 @@ const rpsSessionIdSchema = z
   .string()
   .min(1)
   .optional()
-  .describe("session_id from rps_get_env_session, rps_bootstrap_session, or unibo_browser_login.");
-
-registerCookieBootstrapTool({
-  toolName: "rps_bootstrap_session",
-  title: "Bootstrap RPS Session",
-  service: "rps",
-  cookieDescription: "PHPSESSID cookie header for rps.unibo.it",
-  defaultLabel: "rps-bootstrap"
-});
-
-registerEnvCookieSessionTool({
-  toolName: "rps_get_env_session",
-  title: "Get RPS Env-Backed Session",
-  service: "rps",
-  envVarName: "RPS_COOKIES"
-});
+  .describe("session_id from unibo_login or unibo_bootstrap_session.");
 
 server.registerTool(
   "rps_get_attendance_records",
@@ -1088,22 +916,7 @@ const solSessionIdSchema = z
   .string()
   .min(1)
   .optional()
-  .describe("session_id from sol_get_env_session, sol_bootstrap_session, or unibo_browser_login.");
-
-registerCookieBootstrapTool({
-  toolName: "sol_bootstrap_session",
-  title: "Bootstrap Studenti Online Session",
-  service: "sol",
-  cookieDescription: "JSESSIONID cookie header for studenti.unibo.it",
-  defaultLabel: "sol-bootstrap"
-});
-
-registerEnvCookieSessionTool({
-  toolName: "sol_get_env_session",
-  title: "Get Studenti Online Env-Backed Session",
-  service: "sol",
-  envVarName: "SOL_COOKIES"
-});
+  .describe("session_id from unibo_login or unibo_bootstrap_session.");
 
 server.registerTool(
   "sol_get_career",

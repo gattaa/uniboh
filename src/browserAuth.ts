@@ -1,7 +1,23 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
 
-import { extractSesskey } from "./login.js";
 import { isAlmaesamiAuthExpired, isRpsAuthExpired, isSolAuthExpired } from "./sessions.js";
+
+export function extractSesskey(html: string): string | null {
+  const patterns = [
+    /"sesskey"\s*:\s*"([^"]+)"/,
+    /M\.cfg\.sesskey\s*=\s*'([^']+)'/,
+    /sesskey=([a-zA-Z0-9]+)/
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
 
 /**
  * Headless Chromium login across the Unibo SSO estate. `/login/index.php` on
@@ -200,7 +216,7 @@ async function completeVirtualeLogin(
       // Nothing on this IdP page we know how to fill — likely MFA / an
       // unexpected step. Give up rather than spin.
       throw new Error(
-        `Stuck on an ADFS page this headless flow can't advance (${page.url()}). This usually means MFA/verification is required — use virtuale_bootstrap_session instead.`
+        `Stuck on an ADFS page this headless flow can't advance (${page.url()}). This usually means MFA/verification is required — use unibo_bootstrap_session instead.`
       );
     }
 
@@ -221,7 +237,7 @@ async function completeVirtualeLogin(
     throw new Error(
       `Login did not complete — still on ${page.url()}. ${
         filledPassword ? "Credentials may be wrong, or MFA is required." : "Could not reach the password step."
-      } Use virtuale_bootstrap_session if MFA is enabled.`
+      } Use unibo_bootstrap_session if MFA is enabled.`
     );
   }
 

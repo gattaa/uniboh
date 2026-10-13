@@ -38,7 +38,6 @@ src/
   server.ts          MCP server: registers every tool
   sessions.ts        Unified in-memory SessionStore + shared auth-expiry detectors
   virtualeClient.ts  Moodle AJAX client (service.php + service-nologin.php)
-  login.ts           Best-effort HTML form-login scraper (sesskey + cookies)
   browserAuth.ts     Headless-Chromium ADFS SSO login capturing cookies for every service
   calendar.ts        corsi.unibo.it timetable → normalized events → ICS (pure + fetch)
   virtualeFiles.ts   Virtuale course file/resource download (+ PDF text extraction)
@@ -62,9 +61,10 @@ and `sol-api-notes.md`.
   `getClientForSession(session_id)` in `server.ts` — either a stored session or the
   env-var (`VIRTUALE_SESSKEY` + `VIRTUALE_COOKIES`) fallback. New authenticated services
   should reuse this session store rather than inventing their own.
-- **Bootstrap over password login.** Most Unibo accounts are behind SSO/MFA, so
-  `virtuale_login_with_password` is unreliable; `virtuale_bootstrap_session` (paste a
-  browser `sesskey` + cookies) is the dependable path. Assume the same for future services.
+- **Auto login + bootstrap.** With `EMAIL`+`PASSWORD` set, the resolvers fall back to the
+  default browser-login session and `withAutoRelogin` runs the headless login on first use.
+  Most accounts are behind SSO/MFA, so `unibo_bootstrap_session` (paste a browser `sesskey` +
+  cookies) is the dependable path. Assume the same for future services.
 - **Secrets stay in memory.** Never persist `sesskey`/cookies to disk or log them. Never
   commit credentials or `.env`.
 

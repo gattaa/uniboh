@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  NoCredentialsError,
   SessionExpiredError,
   SessionStore,
   isAlmaesamiAuthExpired,
@@ -70,7 +71,7 @@ test("resolveVirtualeAjax falls back to env and is refreshable", () => {
 
 test("resolveVirtualeAjax throws when neither session nor env creds exist", () => {
   const store = envStore({ virtualeSesskey: undefined, virtualeCookies: undefined });
-  assert.throws(() => store.resolveVirtualeAjax(undefined), /No authenticated Virtuale context/);
+  assert.throws(() => store.resolveVirtualeAjax(undefined), NoCredentialsError);
 });
 
 test("resolveVirtualeAjax marks bootstrap sessions non-refreshable and browser/env refreshable", () => {
@@ -124,16 +125,37 @@ test("resolveCookieService throws for a session lacking that service's creds", (
   assert.throws(() => store.resolveCookieService("almaesami", virtualeOnly.id, undefined), /no almaesami credentials/);
 });
 
-test("getOrCreateEnvVirtualeSession and env cookie sessions are idempotent", () => {
-  const store = envStore();
-  const a = store.getOrCreateEnvVirtualeSession();
-  const b = store.getOrCreateEnvVirtualeSession();
-  assert.equal(a.id, b.id);
+test("resolvers fall back to the default browser session after env, before erroring", () => {
+  const bare = { virtualeSesskey: undefined, virtualeCookies: undefined, almaesamiCookies: undefined, rpsCookies: undefined };
+  const store = envStore(bare);
+  assert.throws(() => store.resolveVirtualeCookies(undefined), NoCredentialsError);
+  assert.throws(() => store.resolveCookieService("rps", undefined), NoCredentialsError);
 
-  const r1 = store.getOrCreateEnvCookieSession("rps");
-  const r2 = store.getOrCreateEnvCookieSession("rps");
-  assert.equal(r1.id, r2.id);
-  assert.equal(store.resolveCookieService("rps", r1.id, undefined).cookies, "PHPSESSID=ENV_R");
+  const rec = store.mint({
+    label: "w",
+    origin: "browser",
+    virtuale: { sesskey: "BSK", cookies: "BV" },
+    rps: { cookies: "BR" }
+  });
+  store.browserSessionId = rec.id;
+  assert.deepEqual(
+    { s: store.resolveVirtualeAjax(undefined).sesskey, r: store.resolveVirtualeAjax(undefined).refreshable },
+    { s: "BSK", r: true }
+  );
+  assert.equal(store.resolveVirtualeCookies(undefined).cookies, "BV");
+  assert.equal(store.resolveCookieService("rps", undefined).cookies, "BR");
+  // Browser record lacks almaesami -> still no credentials.
+  assert.throws(() => store.resolveCookieService("almaesami", undefined), NoCredentialsError);
+
+  // Precedence: explicit override and explicit session_id beat the browser default; env beats it too.
+  assert.equal(store.resolveCookieService("rps", undefined, "OV").cookies, "OV");
+  const boot = store.mint({ label: "b", origin: "bootstrap", rps: { cookies: "BOOT" } });
+  assert.equal(store.resolveCookieService("rps", boot.id).cookies, "BOOT");
+  assert.equal(envStore().resolveCookieService("rps", undefined).cookies, "PHPSESSID=ENV_R");
+
+  // Deleting the browser session clears the default.
+  store.delete(rec.id);
+  assert.throws(() => store.resolveVirtualeAjax(undefined), NoCredentialsError);
 });
 
 test("applyRefresh updates env + env/browser records but leaves bootstrap sessions untouched", () => {

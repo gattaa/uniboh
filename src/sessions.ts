@@ -83,13 +83,13 @@ export type CookieContext = {
 };
 
 export const VIRTUALE_EXPIRED_MESSAGE =
-  "Virtuale session expired — re-bootstrap or run unibo_browser_login.";
+  "Virtuale session expired — re-bootstrap with unibo_bootstrap_session or run unibo_login.";
 export const ALMAESAMI_EXPIRED_MESSAGE =
-  "AlmaEsami session is missing or expired (SSO login / sessione scaduta). Re-bootstrap with almaesami_bootstrap_session or run unibo_browser_login.";
+  "AlmaEsami session is missing or expired (SSO login / sessione scaduta). Re-bootstrap with unibo_bootstrap_session or run unibo_login.";
 export const RPS_EXPIRED_MESSAGE =
-  "RPS session is missing or expired (redirected to Unibo SSO). Re-bootstrap with rps_bootstrap_session or run unibo_browser_login.";
+  "RPS session is missing or expired (redirected to Unibo SSO). Re-bootstrap with unibo_bootstrap_session or run unibo_login.";
 export const SOL_EXPIRED_MESSAGE =
-  "Studenti Online (SOL) session is missing or expired (redirected to Unibo SSO / SOL welcome page). Re-bootstrap with sol_bootstrap_session or run unibo_browser_login.";
+  "Studenti Online (SOL) session is missing or expired (redirected to Unibo SSO / SOL welcome page). Re-bootstrap with unibo_bootstrap_session or run unibo_login.";
 
 /** Thrown when a service response indicates the session is no longer valid.
  * The auto-relogin wrapper keys off this type (and `service`) to decide
@@ -101,6 +101,16 @@ export class SessionExpiredError extends Error {
     super(message);
     this.name = "SessionExpiredError";
     this.service = service;
+  }
+}
+
+/** Thrown by the store resolvers when no credentials at all are available. The
+ * auto-relogin wrapper treats it like an expiry on first resolve (browser login
+ * when EMAIL+PASSWORD are set). */
+export class NoCredentialsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoCredentialsError";
   }
 }
 
@@ -190,8 +200,9 @@ const isRefreshableOrigin = (origin: SessionOrigin): boolean =>
 
 export class SessionStore {
   private readonly sessions = new Map<string, SessionRecord>();
-  private readonly envSessionIds = new Map<ServiceName, string>();
   private readonly env: StoreEnv;
+  /** Current browser-login session; the resolvers' last-resort fallback. */
+  browserSessionId?: string;
 
   constructor(env: StoreEnv) {
     this.env = env;
@@ -202,6 +213,7 @@ export class SessionStore {
   }
 
   delete(id: string): boolean {
+    if (this.browserSessionId === id) this.browserSessionId = undefined;
     return this.sessions.delete(id);
   }
 
@@ -272,47 +284,9 @@ export class SessionStore {
     }
   }
 
-  // --- Env-backed session singletons ---------------------------------------
-
-  /** Mint (or reuse) the env-var-backed Virtuale session. */
-  getOrCreateEnvVirtualeSession(): SessionRecord {
-    if (!this.env.virtualeSesskey || !this.env.virtualeCookies) {
-      throw new Error("VIRTUALE_SESSKEY and VIRTUALE_COOKIES are not both set in the server environment.");
-    }
-    const existingId = this.envSessionIds.get("virtuale");
-    const existing = existingId ? this.sessions.get(existingId) : undefined;
-    if (existing) {
-      this.touch(existing);
-      return existing;
-    }
-    const record = this.mint({
-      label: "env-session",
-      origin: "env",
-      virtuale: { sesskey: this.env.virtualeSesskey, cookies: this.env.virtualeCookies }
-    });
-    this.envSessionIds.set("virtuale", record.id);
-    return record;
-  }
-
-  /** Mint (or reuse) the env-var-backed cookie session for AlmaEsami/RPS/SOL. */
-  getOrCreateEnvCookieSession(service: CookieServiceName): SessionRecord {
-    const cookies = this.envCookiesFor(service);
-    if (!cookies) {
-      throw new Error(`${this.envVarNameFor(service)} is not set in the server environment.`);
-    }
-    const existingId = this.envSessionIds.get(service);
-    const existing = existingId ? this.sessions.get(existingId) : undefined;
-    if (existing) {
-      this.touch(existing);
-      return existing;
-    }
-    const record = this.mint({
-      label: `${service}-env-session`,
-      origin: "env",
-      [service]: { cookies }
-    });
-    this.envSessionIds.set(service, record.id);
-    return record;
+  /** The default browser-login record, if it exists. */
+  private browserRecord(): SessionRecord | undefined {
+    return this.browserSessionId ? this.sessions.get(this.browserSessionId) : undefined;
   }
 
   // --- Resolution ----------------------------------------------------------
@@ -343,8 +317,13 @@ export class SessionStore {
       };
     }
 
-    throw new Error(
-      "No authenticated Virtuale context. Set VIRTUALE_SESSKEY + VIRTUALE_COOKIES, run unibo_browser_login, or pass a session_id from virtuale_bootstrap_session."
+    const browser = this.browserRecord()?.virtuale;
+    if (browser?.sesskey && browser.cookies) {
+      return { sesskey: browser.sesskey, cookies: browser.cookies, baseUrl: this.env.virtualeBaseUrl, refreshable: true };
+    }
+
+    throw new NoCredentialsError(
+      "No authenticated Virtuale context. Set EMAIL + PASSWORD (automatic login) or VIRTUALE_SESSKEY + VIRTUALE_COOKIES, run unibo_login, or pass a session_id from unibo_bootstrap_session."
     );
   }
 
@@ -365,8 +344,12 @@ export class SessionStore {
     if (this.env.virtualeCookies) {
       return { cookies: this.env.virtualeCookies, baseUrl: this.env.virtualeBaseUrl, refreshable: true };
     }
-    throw new Error(
-      "No Virtuale cookie session available. Pass `cookies` (MoodleSession=...), a `session_id`, or set VIRTUALE_COOKIES."
+    const browser = this.browserRecord()?.virtuale?.cookies;
+    if (browser) {
+      return { cookies: browser, baseUrl: this.env.virtualeBaseUrl, refreshable: true };
+    }
+    throw new NoCredentialsError(
+      "No Virtuale cookie session available. Pass `cookies` (MoodleSession=...), a `session_id`, or set EMAIL + PASSWORD or VIRTUALE_COOKIES."
     );
   }
 
@@ -393,8 +376,12 @@ export class SessionStore {
     if (envCookies) {
       return { cookies: envCookies, baseUrl, refreshable: true };
     }
-    throw new Error(
-      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see ${service}_get_env_session / ${service}_bootstrap_session), or set ${this.envVarNameFor(service)}.`
+    const browser = this.browserRecord()?.[service]?.cookies;
+    if (browser) {
+      return { cookies: browser, baseUrl, refreshable: true };
+    }
+    throw new NoCredentialsError(
+      `No ${service} session available. Pass \`cookies\`, a \`session_id\` (see unibo_bootstrap_session), or set EMAIL + PASSWORD or ${this.envVarNameFor(service)}.`
     );
   }
 
