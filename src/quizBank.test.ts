@@ -81,6 +81,15 @@ test("parseMoodleDateToISO extracts a UTC-independent date from a Completed/Star
   assert.throws(() => parseMoodleDateToISO({ Status: "Finished" }));
 });
 
+test("parseMoodleDateToISO handles Italian-locale keys and month names", () => {
+  assert.equal(
+    parseMoodleDateToISO({ Stato: "Completato", Iniziato: "lunedì, 22 giugno 2026, 18:35", Terminato: "lunedì, 22 giugno 2026, 18:36" }),
+    "2026-06-22"
+  );
+  // Started-only (Iniziato) fallback, no Terminato/Completed key present.
+  assert.equal(parseMoodleDateToISO({ Iniziato: "martedì, 1 dicembre 2025, 8:05" }), "2025-12-01");
+});
+
 test("assertNoDuplicateAttemptIds refuses when an attempt_id is already present", () => {
   const attempt: BankAttempt = {
     cmid: 1,

@@ -138,7 +138,7 @@ export function parseQuizAttempts(html: string): QuizAttemptSummary[] {
     attempts.push({
       attemptNumber,
       attemptId,
-      status: details["Status"] ?? "",
+      status: details["Status"] ?? details["Stato"] ?? "",
       details,
       reviewUrl: reviewHref
     });

@@ -45,19 +45,22 @@ export type SyncSummary = {
   failed?: SyncFailure[];
 };
 
+// Moodle renders these labels/dates in the viewer's UI language. virtuale.unibo.it
+// accounts are commonly Italian-locale, so support English + Italian month names
+// (extend this list if other locales show up).
 const MONTHS = [
-  "january",
-  "february",
-  "march",
-  "april",
-  "may",
-  "june",
-  "july",
-  "august",
-  "september",
-  "october",
-  "november",
-  "december"
+  ["january", "gennaio"],
+  ["february", "febbraio"],
+  ["march", "marzo"],
+  ["april", "aprile"],
+  ["may", "maggio"],
+  ["june", "giugno"],
+  ["july", "luglio"],
+  ["august", "agosto"],
+  ["september", "settembre"],
+  ["october", "ottobre"],
+  ["november", "novembre"],
+  ["december", "dicembre"]
 ];
 
 /**
@@ -68,20 +71,21 @@ const MONTHS = [
  */
 export function parseMoodleDateToISO(details: Record<string, string>): string {
   const key =
-    Object.keys(details).find((k) => /^completed/i.test(k)) ??
-    Object.keys(details).find((k) => /^started/i.test(k));
+    Object.keys(details).find((k) => /^(completed|terminato)/i.test(k)) ??
+    Object.keys(details).find((k) => /^(started|iniziato)/i.test(k));
   if (!key) {
     throw new Error(`Attempt summary has no Completed/Started date field (keys: ${Object.keys(details).join(", ")}).`);
   }
 
   const raw = details[key];
-  const match = raw.match(/(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/);
+  const match = raw.match(/(\d{1,2})\s+([A-Za-zÀ-ſ]+)\s+(\d{4})/);
   if (!match) {
     throw new Error(`Could not parse a date out of "${raw}".`);
   }
 
   const day = match[1].padStart(2, "0");
-  const monthIndex = MONTHS.indexOf(match[2].toLowerCase());
+  const monthName = match[2].toLowerCase();
+  const monthIndex = MONTHS.findIndex((names) => names.includes(monthName));
   if (monthIndex === -1) {
     throw new Error(`Unknown month name in "${raw}".`);
   }
@@ -184,7 +188,12 @@ export async function syncQuizBank(
   for (const cmid of cmids) {
     const { attempts } = await getQuizAttempts(cmid, ctx);
     const quizName = nameByCmid.get(cmid) ?? `Quiz ${cmid}`;
-    const finished = attempts.filter((a) => a.status.toLowerCase() === "finished" && a.attemptId);
+    // Don't gate on `status`: Moodle renders it in the account's UI language
+    // (e.g. "Completato" instead of "Finished"), so an English-only string
+    // match silently drops every attempt on non-English accounts. `attemptId`
+    // is only populated when Moodle exposes a review link, which only happens
+    // for finished/reviewable attempts — that's the reliable, locale-free signal.
+    const finished = attempts.filter((a) => Boolean(a.attemptId));
     const newIds: number[] = [];
 
     for (const attempt of finished) {

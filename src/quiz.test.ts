@@ -48,6 +48,33 @@ test("parseQuizAttempts reads the summary table and links the review URL", () =>
   assert.equal(attempts[0].details["Marks"], "26.00/10.00");
 });
 
+test("parseQuizAttempts reads the Italian-locale summary table (Stato instead of Status)", () => {
+  const html = `
+    <html><body>
+      <div class="card h-100">
+        <table class="generalbox quizreviewsummary mb-0">
+          <caption class="sr-only">Tentativo 1 di riepilogo</caption>
+          <tbody>
+            <tr><th class="cell" scope="row">Stato</th><td class="cell">Completato</td></tr>
+            <tr><th class="cell" scope="row">Iniziato</th><td class="cell">martedì, 23 giugno 2026, 12:26</td></tr>
+            <tr><th class="cell" scope="row">Terminato</th><td class="cell">martedì, 23 giugno 2026, 12:30</td></tr>
+            <tr><th class="cell" scope="row">Punteggio</th><td class="cell">29,00/10,00</td></tr>
+          </tbody>
+        </table>
+        <div class="card-body py-2">
+          <div><a title="Rivedi le risposte a questo tentativo" href="https://virtuale.unibo.it/mod/quiz/review.php?attempt=4366236&cmid=2373172">Rivedi</a></div>
+        </div>
+      </div>
+    </body></html>`;
+
+  const attempts = parseQuizAttempts(html);
+  assert.equal(attempts.length, 1);
+  // This is the field the sync bug depended on: previously undetected because
+  // details["Status"] doesn't exist on an Italian-locale page.
+  assert.equal(attempts[0].status, "Completato");
+  assert.equal(attempts[0].attemptId, "4366236");
+});
+
 test("parseAttemptReview extracts question text, answers, correctness and feedback", () => {
   const html = `
     <html><body>
