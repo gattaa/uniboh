@@ -76,11 +76,31 @@ async function fetchText(url: string): Promise<string> {
 }
 
 async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetchWithTimeout(url, { redirect: "follow" });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} while fetching ${url}`);
+  // corsi.unibo.it 5xxes a fair share of requests at random (Oct 2026), so retry those.
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetchWithTimeout(url, { redirect: "follow" });
+    if (res.ok) {
+      return res.json();
+    }
+    if (res.status < 500 || attempt >= 4) {
+      throw new Error(`HTTP ${res.status} while fetching ${url}`);
+    }
+    await new Promise((r) => setTimeout(r, 500 * attempt));
   }
-  return res.json();
+}
+
+/**
+ * The academic year around `now` (Sep 1 → Aug 31) as calendar months. Since Oct 2026
+ * @@orario_reale_json 503s without start/end, and on any range past ~45 days.
+ */
+export function academicMonths(now: Date = new Date()): { start: string; end: string }[] {
+  const [y, m] = now.toLocaleDateString("en-CA", { timeZone: "Europe/Rome" }).split("-").map(Number) as [number, number];
+  const firstYear = m >= 9 ? y : y - 1;
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  return Array.from({ length: 12 }, (_, i) => ({
+    start: iso(new Date(Date.UTC(firstYear, 8 + i, 1))),
+    end: iso(new Date(Date.UTC(firstYear, 9 + i, 0)))
+  }));
 }
 
 export async function resolveTimetableUrl(uniboCourseUrl: string): Promise<{ timetableUrl: string }> {
@@ -210,9 +230,17 @@ export async function listEvents(input: {
   endpoint.searchParams.set("curricula", input.curriculum);
   endpoint.searchParams.set("calendar_view", "");
 
-  const raw = await fetchJson(endpoint.toString());
-  if (!Array.isArray(raw)) {
-    throw new Error("Unexpected events response shape.");
+  // One month per request, sequentially: upstream caps the range.
+  const raw: unknown[] = [];
+  for (const range of academicMonths()) {
+    const url = new URL(endpoint);
+    url.searchParams.set("start", range.start);
+    url.searchParams.set("end", range.end);
+    const month = await fetchJson(url.toString());
+    if (!Array.isArray(month)) {
+      throw new Error("Unexpected events response shape.");
+    }
+    raw.push(...month);
   }
 
   const selected = new Set((input.selectedTeachingCodes ?? []).map((x) => normalizeCode(x)).filter(Boolean));

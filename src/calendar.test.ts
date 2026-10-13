@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { eventsToIcs, type TimetableEvent } from "./calendar.js";
+import { academicMonths, eventsToIcs, type TimetableEvent } from "./calendar.js";
 
 function makeEvent(overrides: Partial<TimetableEvent> = {}): TimetableEvent {
   return {
@@ -74,4 +74,13 @@ test("eventsToIcs derives a stable UID from extCode and start", () => {
   assert.ok(uidA);
   assert.equal(uidA, uidB);
   assert.match(uidA!, /@uniboh$/);
+});
+
+test("academicMonths covers Sep to Aug around now, one month per range", () => {
+  const months = academicMonths(new Date("2026-10-13T12:00:00Z"));
+  assert.equal(months.length, 12);
+  assert.deepEqual(months[0], { start: "2026-09-01", end: "2026-09-30" });
+  assert.deepEqual(months[5], { start: "2027-02-01", end: "2027-02-28" });
+  assert.deepEqual(months[11], { start: "2027-08-01", end: "2027-08-31" });
+  assert.equal(academicMonths(new Date("2027-07-01T12:00:00Z"))[0]?.start, "2026-09-01");
 });
