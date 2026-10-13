@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { parseAttemptReview } from "./quiz.js";
-import { mapReviewToAttempt, parseMoodleDateToISO, assertNoDuplicateAttemptIds, type BankAttempt } from "./quizBank.js";
+import { mapReviewToAttempt, parseMoodleDateToISO, assertNoDuplicateAttemptIds, readBankFile, syncQuizBank, type BankAttempt } from "./quizBank.js";
 
 const reviewHtml = `
   <html><body>
@@ -100,4 +100,14 @@ test("assertNoDuplicateAttemptIds refuses when an attempt_id is already present"
   };
   assert.throws(() => assertNoDuplicateAttemptIds(new Set([42]), [attempt]));
   assert.doesNotThrow(() => assertNoDuplicateAttemptIds(new Set([7]), [attempt]));
+});
+
+test("a missing bank file behaves as an empty bank (dry run included)", async () => {
+  const missing = "/nonexistent-dir/quiz-bank.json";
+  assert.deepEqual(readBankFile(missing), { quizzes: [], attempts: [] });
+  // Gets past the file read and fails only for lack of cmids to sync.
+  await assert.rejects(
+    syncQuizBank(missing, { cookies: "x", dryRun: true }),
+    (e: Error) => /No cmids to sync/.test(e.message) && !/not found/.test(e.message)
+  );
 });

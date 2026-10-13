@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import { getQuizAttempts, getAttemptReview, type QuizAttemptReview } from "./quiz.js";
 
@@ -134,9 +135,10 @@ export function mapReviewToAttempt(
   };
 }
 
-function readBankFile(bankPath: string): QuizBankFile {
+/** A missing bank file is an empty bank (a real sync run then creates it). */
+export function readBankFile(bankPath: string): QuizBankFile {
   if (!fs.existsSync(bankPath)) {
-    throw new Error(`Bank file not found: ${bankPath}`);
+    return { quizzes: [], attempts: [] };
   }
   const raw = JSON.parse(fs.readFileSync(bankPath, "utf8"));
   if (!Array.isArray(raw.attempts)) {
@@ -232,8 +234,12 @@ export async function syncQuizBank(
 
   let backupPath: string | null = null;
   if (!dryRun && toAppend.length > 0) {
-    backupPath = `${bankPath}.bak`;
-    fs.copyFileSync(bankPath, backupPath);
+    if (fs.existsSync(bankPath)) {
+      backupPath = `${bankPath}.bak`;
+      fs.copyFileSync(bankPath, backupPath);
+    } else {
+      fs.mkdirSync(path.dirname(bankPath), { recursive: true });
+    }
     toAppend.sort((a, b) => a.cmid - b.cmid || a.attempt_id - b.attempt_id);
     bank.attempts.push(...toAppend);
     fs.writeFileSync(bankPath, JSON.stringify(bank, null, 2));

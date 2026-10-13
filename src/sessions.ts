@@ -82,6 +82,8 @@ export type CookieContext = {
   refreshable: boolean;
 };
 
+export const UNKNOWN_SESSION_MESSAGE =
+  "Unknown session_id (sessions are in-memory and reset when the server restarts). Omit session_id to use automatic login, or call unibo_login.";
 export const VIRTUALE_EXPIRED_MESSAGE =
   "Virtuale session expired — re-bootstrap with unibo_bootstrap_session or run unibo_login.";
 export const ALMAESAMI_EXPIRED_MESSAGE =
@@ -297,7 +299,7 @@ export class SessionStore {
       const record = this.requireRecord(sessionId);
       const creds = record.virtuale;
       if (!creds?.sesskey || !creds.cookies) {
-        throw new Error("This session has no Virtuale credentials (sesskey + cookies).");
+        throw this.missingService(record, "Virtuale credentials (sesskey + cookies)");
       }
       this.touch(record);
       return {
@@ -336,7 +338,7 @@ export class SessionStore {
       const record = this.requireRecord(sessionId);
       const cookies = record.virtuale?.cookies;
       if (!cookies) {
-        throw new Error("This session has no Virtuale cookies.");
+        throw this.missingService(record, "Virtuale cookies");
       }
       this.touch(record);
       return { cookies, baseUrl: this.env.virtualeBaseUrl, refreshable: isRefreshableOrigin(record.origin) };
@@ -367,7 +369,7 @@ export class SessionStore {
       const record = this.requireRecord(sessionId);
       const cookies = record[service]?.cookies;
       if (!cookies) {
-        throw new Error(`This session has no ${service} credentials.`);
+        throw this.missingService(record, `${service} credentials`);
       }
       this.touch(record);
       return { cookies, baseUrl, refreshable: isRefreshableOrigin(record.origin) };
@@ -388,15 +390,23 @@ export class SessionStore {
   private requireRecord(sessionId: string): SessionRecord {
     const record = this.sessions.get(sessionId);
     if (!record) {
-      throw new Error("Unknown session_id.");
+      throw new Error(UNKNOWN_SESSION_MESSAGE);
     }
     return record;
+  }
+
+  /** A session lacking a service: if it is ours to refresh (env/browser origin),
+   * signal NoCredentialsError so the auto-relogin wrapper re-runs the login and
+   * fills it in; user-pasted sessions keep a plain error. */
+  private missingService(record: SessionRecord, what: string): Error {
+    const message = `This session has no ${what}.`;
+    return isRefreshableOrigin(record.origin) ? new NoCredentialsError(message) : new Error(message);
   }
 
   /**
    * Apply fresh credentials from a re-login: update the env holders (so env
    * fallbacks pick them up) and every env-/browser-origin record that already
-   * carried that service. User-pasted (bootstrap/password) records are left
+   * carried that service (browser-origin records also gain services a partial login missed). User-pasted (bootstrap/password) records are left
    * untouched.
    */
   applyRefresh(fresh: ServiceRefresh): void {
@@ -418,19 +428,21 @@ export class SessionStore {
     for (const record of this.sessions.values()) {
       if (!isRefreshableOrigin(record.origin)) continue;
       let changed = false;
-      if (fresh.virtuale && record.virtuale) {
+      if (fresh.virtuale && (record.virtuale || record.origin === "browser")) {
         record.virtuale = { sesskey: fresh.virtuale.sesskey, cookies: fresh.virtuale.cookies };
         changed = true;
       }
-      if (fresh.almaesami && record.almaesami) {
+      // A browser-origin record is ours: fill in services a partial login missed.
+      const fill = record.origin === "browser";
+      if (fresh.almaesami && (record.almaesami || fill)) {
         record.almaesami = { cookies: fresh.almaesami.cookies };
         changed = true;
       }
-      if (fresh.rps && record.rps) {
+      if (fresh.rps && (record.rps || fill)) {
         record.rps = { cookies: fresh.rps.cookies };
         changed = true;
       }
-      if (fresh.sol && record.sol) {
+      if (fresh.sol && (record.sol || fill)) {
         record.sol = { cookies: fresh.sol.cookies };
         changed = true;
       }

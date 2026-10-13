@@ -292,7 +292,10 @@ async function captureCookieService(
   const finalUrl = page.url();
   const html = await page.content();
   if (onIdp(finalUrl) || isExpired(html, finalUrl)) {
-    throw new Error(`SAML handshake did not complete — landed on ${shortUrl(finalUrl)}.`);
+    const why = onIdp(finalUrl) ? "still on the IdP" : "page looks like a login/expired page";
+    throw new Error(
+      `SAML handshake did not complete (${why}) — landed on ${shortUrl(finalUrl)}, page says: "${await idpPageText(page)}".`
+    );
   }
 
   // Query cookies against the *target* URL so path-scoped cookies (e.g.

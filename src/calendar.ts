@@ -67,27 +67,22 @@ function getLanguagePath(type: string): LanguagePath {
   return lang;
 }
 
-async function fetchText(url: string): Promise<string> {
-  const res = await fetchWithTimeout(url, { redirect: "follow" });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} while fetching ${url}`);
-  }
-  return res.text();
-}
-
-async function fetchJson(url: string): Promise<unknown> {
+async function fetchOk(url: string): Promise<Response> {
   // corsi.unibo.it 5xxes a fair share of requests at random (Oct 2026), so retry those.
   for (let attempt = 1; ; attempt++) {
     const res = await fetchWithTimeout(url, { redirect: "follow" });
     if (res.ok) {
-      return res.json();
+      return res;
     }
-    if (res.status < 500 || attempt >= 4) {
+    if (res.status < 500 || attempt >= 5) {
       throw new Error(`HTTP ${res.status} while fetching ${url}`);
     }
     await new Promise((r) => setTimeout(r, 500 * attempt));
   }
 }
+
+const fetchText = async (url: string) => (await fetchOk(url)).text();
+const fetchJson = async (url: string): Promise<unknown> => (await fetchOk(url)).json();
 
 /**
  * The academic year around `now` (Sep 1 → Aug 31) as calendar months. Since Oct 2026
@@ -103,29 +98,65 @@ export function academicMonths(now: Date = new Date()): { start: string; end: st
   }));
 }
 
+/** `https://corsi.unibo.it/<type>/<course>` for a link into corsi.unibo.it with a known degree type, else undefined. */
+export function toTimetableUrl(href: string, base?: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(href, base);
+  } catch {
+    return undefined;
+  }
+  const [type, course] = url.pathname.split("/").filter(Boolean);
+  if (url.hostname !== "corsi.unibo.it" || !type || !course || !(type in TYPE_TO_LANGUAGE)) {
+    return undefined;
+  }
+  return `${url.origin}/${type}/${course}`;
+}
+
+/** Splits an inclusive YYYY-MM-DD range into chunks of at most `maxDays` days (upstream caps the range). */
+export function chunkRange(start: string, end: string, maxDays = 31): { start: string; end: string }[] {
+  const day = 86_400_000;
+  const from = Date.parse(`${start}T00:00:00Z`);
+  const to = Date.parse(`${end}T00:00:00Z`);
+  if (Number.isNaN(from) || Number.isNaN(to) || to < from) {
+    throw new Error("Invalid date range: expected start <= end as YYYY-MM-DD.");
+  }
+  const iso = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const out: { start: string; end: string }[] = [];
+  for (let t = from; t <= to; t += maxDays * day) {
+    out.push({ start: iso(t), end: iso(Math.min(t + (maxDays - 1) * day, to)) });
+  }
+  return out;
+}
+
 export async function resolveTimetableUrl(uniboCourseUrl: string): Promise<{ timetableUrl: string }> {
-  const html = await fetchText(uniboCourseUrl);
+  // Already a corsi.unibo.it link: its own type/course is authoritative (the page also links the
+  // other-language sibling, e.g. /magistralecu/<EnglishSlug>, which 404s).
+  const direct = toTimetableUrl(uniboCourseUrl);
+  const html = direct ? "" : await fetchText(uniboCourseUrl);
   const $ = load(html);
 
-  const selectorCandidate = ".social-contact ul li ul li p a";
-  const selected = $(selectorCandidate).first();
+  const hrefs = [
+    $(".social-contact ul li ul li p a").first().attr("href") ?? "",
+    ...$("a[href*='corsi.unibo.it']").map((_, el) => $(el).attr("href") ?? "").get()
+  ];
+  const candidates = [...new Set([direct, ...hrefs.map((h) => toTimetableUrl(h, uniboCourseUrl))].filter((u): u is string => !!u))];
 
-  let href = selected.attr("href") ?? "";
-
-  if (!href) {
-    const fallback = $("a[href*='corsi.unibo.it']").filter((_, el) => {
-      const value = $(el).attr("href") ?? "";
-      return /\/orario-lezioni|\/timetable/i.test(value) || /corsi\.unibo\.it\//i.test(value);
-    }).first();
-    href = fallback.attr("href") ?? "";
-  }
-
-  if (!href) {
+  if (candidates.length === 0) {
     throw new Error("Could not find timetable URL in the provided Unibo page.");
   }
 
-  const normalized = new URL(href, uniboCourseUrl);
-  return { timetableUrl: `${normalized.origin}${normalized.pathname}`.replace(/\/$/, "") };
+  // Return the first candidate whose curricula endpoint actually answers.
+  let lastError: unknown;
+  for (const timetableUrl of candidates) {
+    try {
+      await listCurricula(timetableUrl);
+      return { timetableUrl };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new Error(`No working timetable URL among ${candidates.join(", ")}: ${(lastError as Error).message}`);
 }
 
 export async function listCurricula(timetableUrl: string): Promise<{
@@ -216,6 +247,9 @@ export async function listEvents(input: {
   year: string;
   curriculum: string;
   selectedTeachingCodes?: string[];
+  /** Inclusive YYYY-MM-DD range; defaults to the current academic year (Sep–Aug). */
+  start?: string;
+  end?: string;
 }): Promise<{
   endpoint: string;
   totalEvents: number;
@@ -230,9 +264,12 @@ export async function listEvents(input: {
   endpoint.searchParams.set("curricula", input.curriculum);
   endpoint.searchParams.set("calendar_view", "");
 
-  // One month per request, sequentially: upstream caps the range.
+  // Sequential, chunked requests: upstream caps the range.
+  const ranges = input.start || input.end
+    ? chunkRange(input.start ?? input.end!, input.end ?? input.start!)
+    : academicMonths();
   const raw: unknown[] = [];
-  for (const range of academicMonths()) {
+  for (const range of ranges) {
     const url = new URL(endpoint);
     url.searchParams.set("start", range.start);
     url.searchParams.set("end", range.end);

@@ -94,3 +94,33 @@ export class VirtualeClient {
     return response.json();
   }
 }
+
+// Keys that bloat Moodle payloads (HTML summaries, base64 course images, icon
+// markup) without helping an agent. Everything else is kept as-is.
+const BULKY_KEYS = new Set([
+  "summary",
+  "summaryformat",
+  "summaryfiles",
+  "overviewfiles",
+  "courseimage",
+  "fullnamedisplay",
+  "showshortname",
+  "afterlink",
+  "activityicon",
+  "extraclasses"
+]);
+
+/** Recursively drop {@link BULKY_KEYS}, `data:` URIs, and truncate any string over `maxStr` chars. */
+export function compactMoodle(value: unknown, maxStr = 1000): unknown {
+  if (Array.isArray(value)) return value.map((v) => compactMoodle(v, maxStr));
+  if (typeof value === "string") {
+    return value.length > maxStr ? `${value.slice(0, maxStr)}…[truncated ${value.length - maxStr} chars]` : value;
+  }
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (BULKY_KEYS.has(k) || (typeof v === "string" && v.startsWith("data:"))) continue;
+    out[k] = compactMoodle(v, maxStr);
+  }
+  return out;
+}

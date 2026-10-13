@@ -93,11 +93,11 @@ If you'd rather the model work with an explicit handle, call `unibo_login` (take
 - `unibo_bootstrap_session` — build a session from pasted credentials: `service` (`virtuale`/`almaesami`/`rps`/`sol`) + `cookies` (+ `sesskey` for Virtuale); the cookie is never echoed back.
 - `unibo_get_session_info` — stored session metadata (origin, which services it carries, optionally the cookie headers).
 - `unibo_logout` — drop one session from memory.
-- `virtuale_health_check` — no-login `core_get_string` probe for connectivity.
+- `virtuale_health_check` — reports `{ok, reachable, authenticated}` (no-login probe; if credentials already exist, also a 1-course authenticated call; never starts a login).
 
 ### Virtuale (authenticated)
-- `virtuale_get_enrolled_courses` — wraps `local_uniboapi_get_enrolled_courses_unibo`.
-- `virtuale_get_course_state` — wraps `core_courseformat_get_state`, parses the state JSON.
+- `virtuale_get_enrolled_courses` — wraps `local_uniboapi_get_enrolled_courses_unibo`; HTML summaries, base64 course images and other bulky fields are stripped.
+- `virtuale_get_course_state` — wraps `core_courseformat_get_state`, parses the state JSON (bulky HTML/icon fields stripped, long strings truncated).
 - `virtuale_list_course_files` — slims `core_courseformat_get_state` down to the downloadable
   files/resources, grouped by section (`cmid`, `name`, `modname`, `url`) — a token-friendly
   view; feed a `cmid` to `virtuale_get_resource`.
@@ -138,7 +138,7 @@ settings — it does not start, resume, or answer a live/in-progress attempt.
 - `unibo_calendar_resolve_timetable_url` — find the corsi.unibo.it timetable URL from a course page.
 - `unibo_calendar_list_curricula` — list curricula from `@@available_curricula`.
 - `unibo_calendar_list_teachings` — extract teaching IDs from the timetable page.
-- `unibo_calendar_get_events` — fetch `@@orario_reale_json` events, optional teaching-code filter.
+- `unibo_calendar_get_events` — fetch `@@orario_reale_json` events, optional teaching-code filter and optional `start`/`end` (YYYY-MM-DD; default: whole academic year).
 - `unibo_calendar_get_ics` — same, returned as an ICS calendar string.
 
 ### AlmaEsami (authenticated)

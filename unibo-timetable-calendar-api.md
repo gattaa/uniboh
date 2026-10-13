@@ -133,6 +133,13 @@ async function fetchUniboEvents({ type, course, year, curriculum }) {
 }
 ```
 
+## Oct 2026 upstream behaviour
+
+- `@@orario_reale_json` needs `start`/`end` (inclusive dates); without them, or with a range over ~45 days, it 5xxes. Keep `calendar_view=` present and empty. Chunk longer ranges (we use <=31 days).
+- Upstream also 500s at random (~10% of requests, pages and JSON alike); retrying works.
+- English-taught courses use `singlecycle|1cycle|2cycle` + `timetable` with an English slug (`singlecycle/MedicineAndSurgery`); Italian ones use `magistralecu|magistrale|laurea` + `orario-lezioni`. Course pages also link the other-language sibling (e.g. `/magistralecu/MedicineAndSurgery`, 404), so never take the first corsi link blindly; the resolver keeps the input's own type/course and validates via `@@available_curricula`.
+- `anno` is the course year: for Medicine and Surgery (EN) year 1 is empty in mid-Oct 2026, years 2-3 have lessons.
+
 ## Important caveats
 
 - HTML selectors on Unibo pages are brittle: if frontend markup changes, discovery steps may break.

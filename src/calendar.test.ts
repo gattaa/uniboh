@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { academicMonths, eventsToIcs, type TimetableEvent } from "./calendar.js";
+import { academicMonths, chunkRange, eventsToIcs, toTimetableUrl, type TimetableEvent } from "./calendar.js";
 
 function makeEvent(overrides: Partial<TimetableEvent> = {}): TimetableEvent {
   return {
@@ -83,4 +83,26 @@ test("academicMonths covers Sep to Aug around now, one month per range", () => {
   assert.deepEqual(months[5], { start: "2027-02-01", end: "2027-02-28" });
   assert.deepEqual(months[11], { start: "2027-08-01", end: "2027-08-31" });
   assert.equal(academicMonths(new Date("2027-07-01T12:00:00Z"))[0]?.start, "2026-09-01");
+});
+
+test("chunkRange splits an inclusive range into capped chunks", () => {
+  assert.deepEqual(chunkRange("2026-10-12", "2026-10-18"), [{ start: "2026-10-12", end: "2026-10-18" }]);
+  assert.deepEqual(chunkRange("2026-10-01", "2026-11-05", 31), [
+    { start: "2026-10-01", end: "2026-10-31" },
+    { start: "2026-11-01", end: "2026-11-05" }
+  ]);
+  assert.throws(() => chunkRange("2026-10-18", "2026-10-12"));
+});
+
+test("toTimetableUrl keeps the page's own type/course and rejects unknown types", () => {
+  assert.equal(
+    toTimetableUrl("https://corsi.unibo.it/singlecycle/MedicineAndSurgery/timetable"),
+    "https://corsi.unibo.it/singlecycle/MedicineAndSurgery"
+  );
+  assert.equal(
+    toTimetableUrl("https://corsi.unibo.it/magistralecu/MedicinaChirurgia/orario-lezioni"),
+    "https://corsi.unibo.it/magistralecu/MedicinaChirurgia"
+  );
+  assert.equal(toTimetableUrl("https://corsi.unibo.it/en/foo"), undefined);
+  assert.equal(toTimetableUrl("https://example.com/laurea/x"), undefined);
 });

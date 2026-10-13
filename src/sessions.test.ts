@@ -85,7 +85,7 @@ test("resolveVirtualeAjax marks bootstrap sessions non-refreshable and browser/e
 
 test("resolveVirtualeAjax throws on unknown session and on a session lacking Virtuale creds", () => {
   const store = envStore();
-  assert.throws(() => store.resolveVirtualeAjax("nope"), /Unknown session_id/);
+  assert.throws(() => store.resolveVirtualeAjax("nope"), /Unknown session_id .*unibo_login/);
   const cookieOnly = store.mint({ label: "a", origin: "bootstrap", almaesami: { cookies: "X" } });
   assert.throws(() => store.resolveVirtualeAjax(cookieOnly.id), /no Virtuale credentials/);
 });
@@ -122,7 +122,24 @@ test("resolveCookieService resolves per source with correct refreshability", () 
 test("resolveCookieService throws for a session lacking that service's creds", () => {
   const store = envStore({ almaesamiCookies: undefined });
   const virtualeOnly = store.mint({ label: "v", origin: "browser", virtuale: { sesskey: "S", cookies: "C" } });
-  assert.throws(() => store.resolveCookieService("almaesami", virtualeOnly.id, undefined), /no almaesami credentials/);
+  assert.throws(() => store.resolveCookieService("almaesami", virtualeOnly.id, undefined), NoCredentialsError);
+  // User-pasted sessions lacking a service keep a plain error (never auto-relogin).
+  const boot = store.mint({ label: "b", origin: "bootstrap", virtuale: { sesskey: "S", cookies: "C" } });
+  assert.throws(
+    () => store.resolveCookieService("almaesami", boot.id, undefined),
+    (e: Error) => !(e instanceof NoCredentialsError) && /no almaesami credentials/.test(e.message)
+  );
+});
+
+test("a partial browser login is filled in by the next applyRefresh", () => {
+  const store = envStore({ almaesamiCookies: undefined, solCookies: undefined });
+  const rec = store.mint({ label: "w", origin: "browser", virtuale: { sesskey: "S", cookies: "V" }, rps: { cookies: "R" } });
+  store.browserSessionId = rec.id;
+  assert.throws(() => store.resolveCookieService("sol", undefined), NoCredentialsError);
+  assert.throws(() => store.resolveCookieService("sol", rec.id), NoCredentialsError);
+  store.applyRefresh({ sol: { cookies: "NEW_SOL" } });
+  assert.equal(store.resolveCookieService("sol", rec.id).cookies, "NEW_SOL");
+  assert.equal(store.resolveCookieService("sol", undefined).cookies, "NEW_SOL");
 });
 
 test("resolvers fall back to the default browser session after env, before erroring", () => {

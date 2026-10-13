@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
-import { VirtualeClient, type ServiceCallResult } from "./virtualeClient.js";
+import { VirtualeClient, compactMoodle, type ServiceCallResult } from "./virtualeClient.js";
 import { loginWithBrowser } from "./browserAuth.js";
 import {
   eventsToIcs,
@@ -26,6 +26,7 @@ import {
   NoCredentialsError,
   SessionExpiredError,
   SessionStore,
+  UNKNOWN_SESSION_MESSAGE,
   VIRTUALE_EXPIRED_MESSAGE,
   isMoodleAuthError,
   type ServiceRefresh,
@@ -100,6 +101,9 @@ const canRelogin = (): boolean => Boolean(ssoEmail && ssoPassword);
 // A single in-flight re-login promise shared by concurrent callers, so an
 // expiry storm triggers at most one headless browser login at a time.
 let reloginPromise: Promise<void> | null = null;
+// Per-service errors from the most recent browser login, so a retry that still
+// lacks a service can say why instead of a generic "no credentials".
+let lastLoginErrors: Record<string, string> = {};
 
 /** Headless browser login across all services; throws if nothing was captured. */
 async function browserLogin(): Promise<{ refresh: ServiceRefresh; errors: Record<string, string> }> {
@@ -139,7 +143,8 @@ function mintBrowserSession(refresh: ServiceRefresh): SessionRecord {
 }
 
 async function performRelogin(): Promise<void> {
-  const { refresh } = await browserLogin();
+  const { refresh, errors } = await browserLogin();
+  lastLoginErrors = errors;
   store.applyRefresh(refresh);
   // First-ever login (nothing to refresh in place): mint the default session.
   if (!store.browserSessionId || !store.get(store.browserSessionId)) mintBrowserSession(refresh);
@@ -179,7 +184,17 @@ async function withAutoRelogin<Ctx, T>(
     }
     await reloginOnce();
     // Re-resolve so we pick up the refreshed credentials from the store.
-    return work(resolve().context);
+    // Retries once only: a second NoCredentialsError surfaces the login's own reasons.
+    let ctx: Ctx;
+    try {
+      ctx = resolve().context;
+    } catch (resolveErr) {
+      if (resolveErr instanceof NoCredentialsError && Object.keys(lastLoginErrors).length) {
+        throw new Error(`${resolveErr.message} Automatic login ran but failed for: ${JSON.stringify(lastLoginErrors)}`);
+      }
+      throw resolveErr;
+    }
+    return work(ctx);
   }
 }
 
@@ -353,7 +368,7 @@ server.registerTool(
   async ({ session_id, include_cookie_header }) => {
     const record = store.get(session_id);
     if (!record) {
-      throw new Error("Unknown session_id.");
+      throw new Error(UNKNOWN_SESSION_MESSAGE);
     }
 
     const out: Record<string, unknown> = {
@@ -399,21 +414,58 @@ server.registerTool(
   {
     annotations: READONLY,
     title: "Virtuale Health Check",
-    description: "Runs a safe no-login Moodle AJAX call to validate base connectivity.",
+    description:
+      "Checks that Virtuale is reachable (no-login Moodle AJAX call) and, if credentials are already available, whether they still work. Never triggers a login by itself.",
     inputSchema: {}
   },
   async () => {
-    const data = await publicClient.callNoLogin("core_get_string", {
-      stringid: "loading",
-      stringparams: [],
-      component: "core",
-      lang: "en"
-    });
+    let reachable = false;
+    let reachError: string | undefined;
+    try {
+      const res = await publicClient.callNoLogin("core_get_string", {
+        stringid: "loading",
+        stringparams: [],
+        component: "core",
+        lang: "en"
+      });
+      reachable = Array.isArray(res) && (res[0] as { error?: unknown } | undefined)?.error === false;
+      if (!reachable) reachError = "Unexpected response from Moodle AJAX endpoint.";
+    } catch (err) {
+      reachError = err instanceof Error ? err.message : String(err);
+    }
 
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-      structuredContent: { data }
+    let authenticated: boolean | null = null; // null = no credentials to test yet
+    let authError: string | undefined;
+    if (reachable) {
+      try {
+        store.resolveVirtualeAjax();
+        try {
+          await callVirtualeService(undefined, "health_check", "local_uniboapi_get_enrolled_courses_unibo", {
+            offset: 0,
+            limit: 1,
+            classification: "all",
+            sort: "fullname",
+            customfieldname: "aa",
+            customfieldvalue: ""
+          });
+          authenticated = true;
+        } catch (err) {
+          authenticated = false;
+          authError = err instanceof Error ? err.message : String(err);
+        }
+      } catch {
+        // no credentials yet: automatic login happens on the first authenticated call
+      }
+    }
+
+    const out: Record<string, unknown> = {
+      ok: reachable && authenticated !== false,
+      reachable,
+      authenticated,
+      ...(reachError ? { reach_error: reachError } : {}),
+      ...(authError ? { auth_error: authError } : {})
     };
+    return textResult(out);
   }
 );
 
@@ -479,15 +531,19 @@ server.registerTool(
       timetable_url: z.string().url(),
       year: z.string().min(1),
       curriculum: z.string().min(1),
-      selected_teaching_codes: z.array(z.string().min(1)).default([])
+      selected_teaching_codes: z.array(z.string().min(1)).default([]),
+      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Inclusive start date YYYY-MM-DD; default: whole academic year."),
+      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Inclusive end date YYYY-MM-DD.")
     }
   },
-  async ({ timetable_url, year, curriculum, selected_teaching_codes }) => {
+  async ({ timetable_url, year, curriculum, selected_teaching_codes, start, end }) => {
     const data = await listEvents({
       timetableUrl: timetable_url,
       year,
       curriculum,
-      selectedTeachingCodes: selected_teaching_codes
+      selectedTeachingCodes: selected_teaching_codes,
+      start,
+      end
     });
     return textResult(data as unknown as Record<string, unknown>);
   }
@@ -504,15 +560,19 @@ server.registerTool(
       year: z.string().min(1),
       curriculum: z.string().min(1),
       selected_teaching_codes: z.array(z.string().min(1)).default([]),
+      start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Inclusive start date YYYY-MM-DD; default: whole academic year."),
+      end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Inclusive end date YYYY-MM-DD."),
       calendar_name: z.string().default("Unibo Timetable")
     }
   },
-  async ({ timetable_url, year, curriculum, selected_teaching_codes, calendar_name }) => {
+  async ({ timetable_url, year, curriculum, selected_teaching_codes, start, end, calendar_name }) => {
     const eventsData = await listEvents({
       timetableUrl: timetable_url,
       year,
       curriculum,
-      selectedTeachingCodes: selected_teaching_codes
+      selectedTeachingCodes: selected_teaching_codes,
+      start,
+      end
     });
 
     const ics = eventsToIcs(eventsData.events, calendar_name);
@@ -555,9 +615,11 @@ server.registerTool(
       "local_uniboapi_get_enrolled_courses_unibo",
       args
     );
+    // Raw payload is ~16k chars/course (HTML summary, base64 course image).
+    const data = compactMoodle(result.data);
     return {
-      content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }],
-      structuredContent: { data: result.data }
+      content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      structuredContent: { data }
     };
   }
 );
@@ -582,7 +644,7 @@ server.registerTool(
     );
 
     const rawData = result.data;
-    const parsedState = typeof rawData === "string" ? JSON.parse(rawData) : rawData;
+    const parsedState = compactMoodle(typeof rawData === "string" ? JSON.parse(rawData) : rawData);
 
     return {
       content: [{ type: "text" as const, text: JSON.stringify(parsedState, null, 2) }],
