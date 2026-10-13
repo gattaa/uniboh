@@ -150,27 +150,11 @@ authenticated `JSESSIONID`), or falls back to `ALMAESAMI_COOKIES`.
 - `almaesami_get_exam_history` — the exam history / cronologia (appello date, examiner,
   type/mode, status).
 - `almaesami_get_messages` — student messages (subject, sender, date, related appello).
-- `almaesami_list_appelli` — upcoming exam sessions (appelli): date/time, activity, examiner,
-  type/mode, enrollment window, and a `bookable` flag — to answer "when can I sit exam X".
-  **The endpoint/grid is UNVERIFIED** (it lives behind SSO and could not be confirmed against a
-  live session): the result carries `unverified: true`, the parser reads fields by content so it
-  tolerates layout changes, and the endpoint `path` is overridable. If it returns nothing, fall
-  back to the `bookable` flags on `almaesami_get_exam_plan`.
-
-These never mutate state: booking an exam ("prenota") and deleting messages ("Cancella")
-are intentionally not automated.
-
-AlmaEsami is behind ADFS SSO with no JSON API. If `EMAIL`/`PASSWORD` are set (non-MFA
-account), automatic login captures the `JSESSIONID` automatically. Otherwise
-authenticate the bootstrap way: log in via a browser, copy the `JSESSIONID` cookie for
-`almaesami.unibo.it` (it expires after a short idle period), and hand it to
-`unibo_bootstrap_session`. See [`almaesami-rps-api-notes.md`](almaesami-rps-api-notes.md).
-
-### RPS — attendance (authenticated)
-All read-only. Each accepts `session_id` (from `unibo_login` or
-`unibo_bootstrap_session`) or `cookies` (a cookie header with an
-authenticated `PHPSESSID`), or falls back to `RPS_COOKIES`.
-
+- `almaesami_list_appelli` — **work in progress.** AlmaEsami has no standalone appelli page:
+  sessions only appear per activity (active "+" toggle / "prenota" button on the exam plan) once
+  one is open for booking, and none were open when this was mapped (2026-10). Until then it returns
+  `status: "work_in_progress"` plus the activities the exam plan marks bookable. Optional `path`
+  fetches an explicit route with the legacy grid parser. Read-only; never books.
 - `rps_get_attendance_records` — recorded presences (date, subject, lecturer, duration).
 - `rps_get_register` — per-subject hours attended and attendance percentage.
 

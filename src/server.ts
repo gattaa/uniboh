@@ -907,7 +907,7 @@ server.registerTool(
     annotations: READONLY,
     title: "List AlmaEsami Appelli (Exam Sessions)",
     description:
-      "Lists the student's upcoming AlmaEsami appelli (bookable exam sessions): date/time, activity, examiner, type/mode, and enrollment window — to answer \"when can I sit exam X\". Read-only: it never books. NOTE: the underlying endpoint/grid is UNVERIFIED (it lives behind SSO and could not be confirmed live); the result carries `unverified: true`, and the parser reads fields by content so it tolerates layout changes. If it returns nothing, the exam-plan tool's `bookable` flags are the confirmed signal, or pass an explicit `path`.",
+      "WORK IN PROGRESS. AlmaEsami has no standalone appelli page: sessions only appear per activity (an active \"+\" toggle / \"prenota\" button on the exam plan) once one is open for booking, and none were open when this was mapped. Until then this returns a WIP notice plus the activities the exam plan currently marks bookable — the confirmed signal for \"can I book exam X\". Read-only: it never books. Pass `path` to try an explicit route with the legacy grid parser.",
     inputSchema: {
       session_id: almaesamiSessionIdSchema,
       cookies: almaesamiCookiesSchema,
@@ -917,15 +917,27 @@ server.registerTool(
         .min(1)
         .optional()
         .describe(
-          "Override for the appelli-list endpoint path (default /almaesami/studenti/appelloStudente-list.htm, which is UNVERIFIED). Provide the real route if known."
+          "Explicit appelli route to fetch and parse with the legacy grid parser (there is no known standalone route yet)."
         )
     }
   },
   async ({ session_id, cookies: inputCookies, base_url, path }) => {
-    const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) =>
-      getAppelli({ ...ctx, path })
-    );
-    return textResult(data as unknown as Record<string, unknown>);
+    if (path) {
+      const data = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) =>
+        getAppelli({ ...ctx, path })
+      );
+      return textResult(data as unknown as Record<string, unknown>);
+    }
+    // ponytail: WIP until a bookable activity exists to map the real per-activity appelli view.
+    const plan = await runCookieService("almaesami", session_id, inputCookies, base_url, (ctx) => getExamPlan(ctx));
+    const bookable = plan.entries.filter((e) => e.bookable);
+    return textResult({
+      status: "work_in_progress",
+      message:
+        "Appelli listing is not mapped yet: AlmaEsami only shows exam sessions per activity once one is open for booking. It will be mapped when appelli become available. Meanwhile, `bookable_activities` lists what the exam plan marks bookable right now.",
+      bookable_activities: bookable.map(({ code, name, year, cfu }) => ({ code, name, year, cfu })),
+      total_bookable: bookable.length
+    });
   }
 );
 

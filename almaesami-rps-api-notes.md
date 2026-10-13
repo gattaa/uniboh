@@ -67,6 +67,13 @@ The generic `unibo_bootstrap_session` tool + a per-host session store is that sh
   `/almaesami/sessionExpired.htm` (`<title>… sessione scaduta</title>`). The readers detect
   both this and the SSO bounce and raise a clear "re-capture the cookie" error.
 
+- **Appelli (2026-10-13, logged in):** there is no standalone appelli list — the menu is only
+  Home (exam plan) / Notifications / Reservations, and `appelloStudente-list.htm` returns 500.
+  Availability is server-rendered into the exam-plan HTML (no XHR): per row, the `[0]` "+" toggle
+  is `span.disabledbutton` titled "There is no further information for this activity" and `[6]`
+  is empty when nothing is open; "Book an exam … outside the study plan" (`#ricercaPrenota`) is
+  disabled. Map the "+" expansion / prenota view once a row becomes bookable.
+
 ### TODO (needs auth)
 
 - Booking (`_eventId=prenota`) and message deletion (`Cancella`) are stateful JSF postbacks
