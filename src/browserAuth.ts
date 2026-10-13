@@ -165,6 +165,23 @@ async function dismissOverlays(page: Page): Promise<void> {
 
 const onIdp = (url: string): boolean => /idp\.unibo\.it|login\.microsoftonline\.com|login\.live\.com/i.test(url);
 
+// The SAML query string is kilobytes of noise in an error message.
+const shortUrl = (url: string): string => url.split("?")[0];
+
+/** What the IdP page is telling the user: ADFS's error box if present, else the start of the visible text. */
+async function idpPageText(page: Page): Promise<string> {
+  try {
+    const error = (await page.locator("#errorText, #error, .error, [role='alert']").allInnerTexts())
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (error) return error.slice(0, 300);
+    return (await page.locator("body").innerText()).replace(/\s+/g, " ").trim().slice(0, 300);
+  } catch {
+    return "(unreadable)";
+  }
+}
+
 async function cookieHeaderFor(context: BrowserContext, url: string): Promise<string> {
   const cookies = await context.cookies(url);
   return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
@@ -216,7 +233,7 @@ async function completeVirtualeLogin(
       // Nothing on this IdP page we know how to fill — likely MFA / an
       // unexpected step. Give up rather than spin.
       throw new Error(
-        `Stuck on an ADFS page this headless flow can't advance (${page.url()}). This usually means MFA/verification is required — use unibo_bootstrap_session instead.`
+        `Stuck on an ADFS page this headless flow can't advance (${shortUrl(page.url())}, page says: "${await idpPageText(page)}"). This usually means MFA/verification is required — use unibo_bootstrap_session instead.`
       );
     }
 
@@ -235,7 +252,7 @@ async function completeVirtualeLogin(
 
   if (onIdp(page.url())) {
     throw new Error(
-      `Login did not complete — still on ${page.url()}. ${
+      `Login did not complete — still on ${shortUrl(page.url())} (page says: "${await idpPageText(page)}"). ${
         filledPassword ? "Credentials may be wrong, or MFA is required." : "Could not reach the password step."
       } Use unibo_bootstrap_session if MFA is enabled.`
     );
@@ -275,7 +292,7 @@ async function captureCookieService(
   const finalUrl = page.url();
   const html = await page.content();
   if (onIdp(finalUrl) || isExpired(html, finalUrl)) {
-    throw new Error(`SAML handshake did not complete — landed on ${finalUrl}.`);
+    throw new Error(`SAML handshake did not complete — landed on ${shortUrl(finalUrl)}.`);
   }
 
   // Query cookies against the *target* URL so path-scoped cookies (e.g.

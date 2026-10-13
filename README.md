@@ -53,7 +53,7 @@ npm run dev
 | `SOL_BASE_URL` | no (defaults to `https://studenti.unibo.it`) | Studenti Online base URL. |
 | `SOL_COOKIES` | no | Cookie header with an authenticated `JSESSIONID`; fallback for the `sol_*` tools. |
 | `EMAIL` | no | Unibo SSO email; with `PASSWORD`, enables automatic headless-Chromium ADFS login (Virtuale + AlmaEsami + RPS + Studenti Online) on first use, `unibo_login`, and transparent auto re-login on session expiry. Shared across services since they all federate to the same idp.unibo.it SSO. |
-| `PASSWORD` | no | Unibo SSO password. Only works for accounts without interactive MFA. |
+| `PASSWORD` | no | Unibo SSO password. Only works for accounts without interactive MFA. On macOS, leave it unset and store it in the Keychain instead (read at startup): `security add-generic-password -U -s uniboh -a "$EMAIL" -w` (prompts for the password). |
 
 ## Authentication
 

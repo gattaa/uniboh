@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { z } from "zod";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -37,7 +38,21 @@ const cookies = process.env.VIRTUALE_COOKIES;
 // Shared across all Unibo services (Virtuale, AlmaEsami, RPS all federate to the
 // same idp.unibo.it ADFS SSO), so this is a generic credential, not Virtuale-specific.
 const ssoEmail = process.env.EMAIL;
-const ssoPassword = process.env.PASSWORD;
+const ssoPassword = process.env.PASSWORD || keychainPassword(ssoEmail);
+
+/** macOS Keychain fallback so the password needn't sit in plaintext MCP config:
+ * `security add-generic-password -s uniboh -a <EMAIL> -w` */
+function keychainPassword(account: string | undefined): string | undefined {
+  if (!account || process.platform !== "darwin") return undefined;
+  try {
+    return execFileSync("security", ["find-generic-password", "-s", "uniboh", "-a", account, "-w"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim() || undefined;
+  } catch {
+    return undefined; // no Keychain item — auto-login just stays off
+  }
+}
 
 const almaesamiBaseUrl = process.env.ALMAESAMI_BASE_URL ?? "https://almaesami.unibo.it";
 const almaesamiCookies = process.env.ALMAESAMI_COOKIES;
