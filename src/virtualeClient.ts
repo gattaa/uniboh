@@ -107,7 +107,12 @@ const BULKY_KEYS = new Set([
   "showshortname",
   "afterlink",
   "activityicon",
-  "extraclasses"
+  "extraclasses",
+  // Unibo extras on enrolled courses: UI widgets (unenrol form, visibility toggle) + a summary duplicating code/teacher.
+  "mysummary",
+  "enrolmethods",
+  "changevisibility",
+  "unenrollink"
 ]);
 
 /** Recursively drop {@link BULKY_KEYS}, `data:` URIs, and truncate any string over `maxStr` chars. */

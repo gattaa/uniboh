@@ -289,6 +289,17 @@ async function captureCookieService(
     // best effort — the page may keep a long-poll connection open
   }
 
+  // Some relying parties (AlmaEsami, SOL) re-show Home Realm Discovery even with
+  // a live IdP session; picking UNIBO then completes the SAML handshake silently.
+  if (onIdp(page.url()) && (await selectUniboRealm(page))) {
+    try {
+      await page.waitForURL((url) => !onIdp(url.toString()), { timeout: 15_000 });
+      await page.waitForLoadState("networkidle", { timeout: 10_000 });
+    } catch {
+      // fall through to the checks below, which report where we ended up
+    }
+  }
+
   const finalUrl = page.url();
   const html = await page.content();
   if (onIdp(finalUrl) || isExpired(html, finalUrl)) {
